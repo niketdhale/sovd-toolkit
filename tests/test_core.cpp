@@ -1,16 +1,19 @@
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <thread>
 
 #include "httplib.h"
 #include "json.hpp"
 #include "mock_adapter.h"
+#include "sovd/catalog/did_catalog.hpp"
 #include "sovd/entity_registry.hpp"
 #include "sovd/lock_manager.hpp"
 #include "sovd/server/routes.hpp"
 #include "test_framework.hpp"
 
 using namespace sovd;
+using namespace sovd::catalog;
 using json = nlohmann::json;
 
 // ---------------------------------------------------------------------
@@ -226,6 +229,194 @@ void test_mock_adapter_mode_and_operation() {
 }
 
 // ---------------------------------------------------------------------
+// DID catalog (YAML -> typed definitions)
+// ---------------------------------------------------------------------
+
+const char *kSampleCatalogYaml = R"(
+data:
+  - id: vin
+    did: 0xF190
+    type: string
+    length: 17
+    access: read
+
+  - id: battery_voltage
+    did: 0x010A
+    type: float
+    encoding: { bytes: 2, endian: big, scale: 0.001, unit: V }
+    access: read
+
+  - id: door_lock_state
+    did: 0x0200
+    type: enum
+    values: { 0: unlocked, 1: locked, 2: deadlocked }
+    access: read_write
+    io_control: true
+
+operations:
+  - id: self_test
+    routine_id: 0x0203
+    requires_session: extended
+    async: true
+)";
+
+void test_catalog_parses_data_and_operations() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    ASSERT_EQ(cat.data().size(), static_cast<size_t>(3));
+    ASSERT_EQ(cat.operations().size(), static_cast<size_t>(1));
+
+    const DataItem *vin = cat.find_by_id("vin");
+    ASSERT_TRUE(vin != nullptr);
+    ASSERT_EQ(vin->did, static_cast<uint16_t>(0xF190));
+    ASSERT_TRUE(vin->type == DataType::String);
+    ASSERT_TRUE(vin->access == Access::Read);
+    ASSERT_EQ(vin->length, 17);
+
+    const DataItem *by_did = cat.find_by_did(0x010A);
+    ASSERT_TRUE(by_did != nullptr);
+    ASSERT_EQ(by_did->id, "battery_voltage");
+
+    ASSERT_TRUE(cat.find_by_id("nonexistent") == nullptr);
+
+    const Operation *op = cat.find_operation("self_test");
+    ASSERT_TRUE(op != nullptr);
+    ASSERT_EQ(op->routine_id, static_cast<uint16_t>(0x0203));
+    ASSERT_TRUE(op->requires_session.has_value());
+    ASSERT_EQ(*op->requires_session, "extended");
+    ASSERT_TRUE(op->async);
+}
+
+void test_catalog_float_encoding_fields() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *v = cat.find_by_id("battery_voltage");
+    ASSERT_TRUE(v != nullptr);
+    ASSERT_EQ(v->encoding.bytes, 2);
+    ASSERT_EQ(v->encoding.endian, "big");
+    ASSERT_EQ(v->encoding.scale, 0.001);
+    ASSERT_EQ(v->encoding.unit, "V");
+}
+
+void test_catalog_enum_values_parsed() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *d = cat.find_by_id("door_lock_state");
+    ASSERT_TRUE(d != nullptr);
+    ASSERT_TRUE(d->io_control);
+    ASSERT_TRUE(d->access == Access::ReadWrite);
+    ASSERT_EQ(d->values.size(), static_cast<size_t>(3));
+    bool found_locked = false;
+    for (auto &ev : d->values) {
+        if (ev.raw == 1) {
+            ASSERT_EQ(ev.label, "locked");
+            found_locked = true;
+        }
+    }
+    ASSERT_TRUE(found_locked);
+}
+
+void test_catalog_decode_float_matches_worked_example() {
+    // Matches CLAUDE.md's path-mapping example: 0x32C8 * 0.001 == 13.0
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *v = cat.find_by_id("battery_voltage");
+    auto decoded = Catalog::decode(*v, {0x32, 0xC8});
+    ASSERT_TRUE(std::holds_alternative<double>(decoded));
+    ASSERT_TRUE(std::abs(std::get<double>(decoded) - 13.0) < 1e-9);
+}
+
+void test_catalog_decode_enum_known_and_unknown() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *d = cat.find_by_id("door_lock_state");
+
+    auto known = Catalog::decode(*d, {0x01});
+    ASSERT_TRUE(std::holds_alternative<std::string>(known));
+    ASSERT_EQ(std::get<std::string>(known), "locked");
+
+    // Undocumented raw value: degrade to its numeric text, don't throw.
+    auto unknown = Catalog::decode(*d, {0x09});
+    ASSERT_TRUE(std::holds_alternative<std::string>(unknown));
+    ASSERT_EQ(std::get<std::string>(unknown), "9");
+}
+
+void test_catalog_decode_string_and_raw() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *vin = cat.find_by_id("vin");
+    std::vector<uint8_t> bytes = {'A', 'B', 'C'};
+    auto decoded = Catalog::decode(*vin, bytes);
+    ASSERT_TRUE(std::holds_alternative<std::string>(decoded));
+    ASSERT_EQ(std::get<std::string>(decoded), "ABC");
+
+    DataItem raw_item;
+    raw_item.id = "unknown_item";
+    raw_item.type = DataType::Raw;
+    auto raw_decoded = Catalog::decode(raw_item, {0xDE, 0xAD});
+    ASSERT_EQ(std::get<std::string>(raw_decoded), "DEAD");
+}
+
+void test_catalog_decode_float_wrong_length_throws() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *v = cat.find_by_id("battery_voltage");
+    bool threw = false;
+    try {
+        Catalog::decode(*v, {0x01}); // encoding says 2 bytes
+    } catch (const CatalogError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+void test_catalog_rejects_missing_required_field() {
+    bool threw = false;
+    try {
+        Catalog::load_from_string("data:\n  - did: 0xF190\n    type: string\n    access: read\n");
+    } catch (const CatalogError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw); // missing 'id'
+}
+
+void test_catalog_rejects_float_without_encoding() {
+    bool threw = false;
+    try {
+        Catalog::load_from_string("data:\n  - id: x\n    did: 0x1234\n    type: float\n    access: read\n");
+    } catch (const CatalogError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+void test_catalog_rejects_invalid_hex_did() {
+    bool threw = false;
+    try {
+        Catalog::load_from_string("data:\n  - id: x\n    did: not-hex\n    type: raw\n    access: read\n");
+    } catch (const CatalogError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+void test_catalog_empty_document_is_valid_empty_catalog() {
+    Catalog cat = Catalog::load_from_string("");
+    ASSERT_EQ(cat.data().size(), static_cast<size_t>(0));
+    ASSERT_EQ(cat.operations().size(), static_cast<size_t>(0));
+}
+
+void test_catalog_load_from_file() {
+    std::string path = std::string(SOVD_SOURCE_DIR) + "/catalogs/bcm.yaml";
+    Catalog cat = Catalog::load_from_file(path);
+    ASSERT_EQ(cat.data().size(), static_cast<size_t>(3));
+    ASSERT_TRUE(cat.find_by_id("vin") != nullptr);
+}
+
+void test_catalog_access_and_type_to_string() {
+    ASSERT_EQ(access_to_string(Access::Read), "read");
+    ASSERT_EQ(access_to_string(Access::Write), "write");
+    ASSERT_EQ(access_to_string(Access::ReadWrite), "read_write");
+    ASSERT_EQ(data_type_to_string(DataType::String), "string");
+    ASSERT_EQ(data_type_to_string(DataType::Float), "float");
+    ASSERT_EQ(data_type_to_string(DataType::Enum), "enum");
+    ASSERT_EQ(data_type_to_string(DataType::Raw), "raw");
+}
+
+// ---------------------------------------------------------------------
 // End-to-end HTTP (real httplib::Server + httplib::Client, no real network)
 // ---------------------------------------------------------------------
 
@@ -396,6 +587,20 @@ int main() {
     RUN_TEST(test_mock_adapter_faults_roundtrip);
     RUN_TEST(test_mock_adapter_data_read_write);
     RUN_TEST(test_mock_adapter_mode_and_operation);
+
+    RUN_TEST(test_catalog_parses_data_and_operations);
+    RUN_TEST(test_catalog_float_encoding_fields);
+    RUN_TEST(test_catalog_enum_values_parsed);
+    RUN_TEST(test_catalog_decode_float_matches_worked_example);
+    RUN_TEST(test_catalog_decode_enum_known_and_unknown);
+    RUN_TEST(test_catalog_decode_string_and_raw);
+    RUN_TEST(test_catalog_decode_float_wrong_length_throws);
+    RUN_TEST(test_catalog_rejects_missing_required_field);
+    RUN_TEST(test_catalog_rejects_float_without_encoding);
+    RUN_TEST(test_catalog_rejects_invalid_hex_did);
+    RUN_TEST(test_catalog_empty_document_is_valid_empty_catalog);
+    RUN_TEST(test_catalog_load_from_file);
+    RUN_TEST(test_catalog_access_and_type_to_string);
 
     RUN_TEST(test_http_root_and_entities);
     RUN_TEST(test_http_unknown_entity_404);

@@ -1,0 +1,28 @@
+# DID catalog for the body control module (bcm) mock/demo entity.
+# Per-ECU-software-version, kept separate from vehicle topology (see
+# CLAUDE.md's "DID catalog" architectural decision).
+data:
+  - id: vin
+    did: 0xF190
+    type: string
+    length: 17
+    access: read
+
+  - id: battery_voltage
+    did: 0x010A
+    type: float
+    encoding: { bytes: 2, endian: big, scale: 0.001, unit: V }
+    access: read
+
+  - id: door_lock_state
+    did: 0x0200
+    type: enum
+    values: { 0: unlocked, 1: locked, 2: deadlocked }
+    access: read_write
+    io_control: true
+
+operations:
+  - id: self_test
+    routine_id: 0x0203
+    requires_session: extended
+    async: true

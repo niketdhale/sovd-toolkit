@@ -113,19 +113,33 @@ sovd-toolkit/
 │   └── src/{adapter.c, entity_registry.cpp, lock_manager.cpp}
 ├── adapters/
 │   └── mock/               # in-memory, extern "C" only (supplier pattern)
+├── catalog/                 # DID/operation YAML defs — shared by server & adapters
+│   ├── include/sovd/catalog/did_catalog.hpp
+│   └── src/did_catalog.cpp
+├── catalogs/                 # actual per-ECU catalog YAML files (data, not code)
+│   └── bcm.yaml
 ├── server/                 # C++ HTTP layer — NO diagnostic logic
 │   ├── include/sovd/server/routes.hpp
 │   └── src/{main.cpp, routes.cpp}
 ├── tests/
 │   ├── test_framework.hpp  # minimal harness, no external dep
-│   └── test_core.cpp       # 108 assertions
+│   └── test_core.cpp       # 158 assertions
 └── third_party/            # vendored single headers
     ├── httplib.h           # cpp-httplib v0.18.3 (MIT)
     └── json.hpp            # nlohmann/json v3.11.3 (MIT)
 ```
 
+yaml-cpp (MIT) is a build-time dependency fetched via CMake `FetchContent`
+(pinned to `yaml-cpp-0.9.0`), not vendored as a single header — the catalog
+schema below uses flow-style YAML (`{ bytes: 2, ... }`), which ruled out
+header-only minimal parsers (mini-yaml was tried first and dropped: no
+flow-style support at all).
+
 **Layering rule:** `server/` translates HTTP ⇄ core calls and nothing more.
 `core/` holds no I/O. All backend complexity hides behind `adapter.h`.
+`catalog/` is data/logic only (no HTTP, no adapter-specific behavior) —
+shared between `server/` (Phase 1 `/docs`) and `adapters/uds_doip/` (Phase 2
+encode/decode).
 
 ---
 
@@ -134,7 +148,7 @@ sovd-toolkit/
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
-./build/test_core                      # 108 assertions
+./build/test_core                      # 158 assertions
 ./build/sovd_server 20002 domain       # port, role
 cd build && ctest --output-on-failure
 ```
@@ -151,7 +165,7 @@ way.
 
 ## Phase 0 — COMPLETE ✅
 
-Verified: clean warning-free build, 108 assertions passing (`test_core`),
+Verified: clean warning-free build, 158 assertions passing (`test_core`),
 end-to-end HTTP run hitting every expected status code (curl against a live
 `sovd_server`).
 
@@ -217,9 +231,14 @@ DIDs, then have to rewrite it.
 
 - [ ] **`sovd_capability_t`** extension to the adapter vtable — each backend
       declares what it supports
-- [ ] **DID catalog parser** — YAML → typed definitions (`type`, `encoding`,
+- [x] **DID catalog parser** — YAML → typed definitions (`type`, `encoding`,
       `scale`, `unit`, enum `values`, `access`, `io_control`,
-      `requires_session`)
+      `requires_session`). `catalog/` module, backed by yaml-cpp. Includes
+      catalog-driven `decode()` (bytes → typed value: string/float-scaled/
+      enum-label) — not yet wired into `server/routes.cpp`, which is the
+      remaining `/docs` + named-data-path work below. Encode (value → bytes,
+      needed for PUT) is deliberately not built yet — no caller needs it
+      until routes/adapters are wired to the catalog.
 - [ ] **`GET /entities/{path}/docs`** — capability description, serialized from
       the catalog. *This is the answer to "how does the client know what to
       call" and the highest-value remaining feature.*

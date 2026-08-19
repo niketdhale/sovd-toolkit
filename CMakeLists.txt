@@ -25,6 +25,30 @@ add_library(sovd_core STATIC
 target_include_directories(sovd_core PUBLIC core/include)
 target_link_libraries(sovd_core PUBLIC Threads::Threads)
 
+# --- catalog: DID/operation YAML definitions, shared by server and adapters ---
+# yaml-cpp is fetched rather than vendored as a single header: the catalog
+# schema (CLAUDE.md) uses flow-style YAML ({ bytes: 2, ... }), which rules
+# out header-only minimal parsers (mini-yaml, tried first, has no flow-style
+# support at all). yaml-cpp is the standard, well-tested choice that handles
+# the full spec.
+include(FetchContent)
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(YAML_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    yaml-cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+    GIT_TAG yaml-cpp-0.9.0
+)
+FetchContent_MakeAvailable(yaml-cpp)
+
+add_library(sovd_catalog STATIC
+    catalog/src/did_catalog.cpp
+)
+target_include_directories(sovd_catalog PUBLIC catalog/include)
+target_link_libraries(sovd_catalog PUBLIC yaml-cpp::yaml-cpp)
+
 # --- adapters (statically selected at configure time) ---
 set(SOVD_ADAPTER_LIBS "")
 
@@ -54,5 +78,6 @@ target_link_libraries(sovd_server PRIVATE sovd_server_lib ${SOVD_ADAPTER_LIBS})
 enable_testing()
 add_executable(test_core tests/test_core.cpp)
 target_include_directories(test_core PRIVATE tests adapters/mock)
-target_link_libraries(test_core PRIVATE sovd_server_lib ${SOVD_ADAPTER_LIBS} Threads::Threads)
+target_link_libraries(test_core PRIVATE sovd_server_lib sovd_catalog ${SOVD_ADAPTER_LIBS} Threads::Threads)
+target_compile_definitions(test_core PRIVATE SOVD_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME test_core COMMAND test_core)

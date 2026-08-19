@@ -118,7 +118,7 @@ sovd-toolkit/
 │   └── src/{main.cpp, routes.cpp}
 ├── tests/
 │   ├── test_framework.hpp  # minimal harness, no external dep
-│   └── test_core.cpp       # 73 assertions
+│   └── test_core.cpp       # 108 assertions
 └── third_party/            # vendored single headers
     ├── httplib.h           # cpp-httplib v0.18.3 (MIT)
     └── json.hpp            # nlohmann/json v3.11.3 (MIT)
@@ -134,7 +134,7 @@ sovd-toolkit/
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
-./build/test_core                      # 73 assertions
+./build/test_core                      # 108 assertions
 ./build/sovd_server 20002 domain       # port, role
 cd build && ctest --output-on-failure
 ```
@@ -151,8 +151,9 @@ way.
 
 ## Phase 0 — COMPLETE ✅
 
-Verified: clean warning-free build, 73 assertions passing, end-to-end HTTP run
-hitting every expected status code.
+Verified: clean warning-free build, 108 assertions passing (`test_core`),
+end-to-end HTTP run hitting every expected status code (curl against a live
+`sovd_server`).
 
 - [x] `EntityRegistry` — hierarchical paths, parent validation, orphan rejection
 - [x] `LockManager` — TTL, **injectable clock** (no sleeping in tests)
@@ -197,13 +198,13 @@ vehicle
     └── door_ctrl
 ```
 
-### ⚠ KNOWN CARRY-OVER BUG — fix early in Phase 2
-`server/src/routes.cpp` calls adapters with the **leaf** id (`bcm`) via
-`leaf_of(path)`, while the registry keys on the **full path**
-(`vehicle/body/bcm`). Fine for UDS adapters; **wrong for the Phase 4 proxy
-adapter**, which needs the full path to forward correctly.
-**Fix: pass the full path, let each adapter decide what to do with it.**
-Do this *before* a second adapter depends on current behaviour.
+### Carry-over bug from an earlier attempt — already avoided
+An earlier pass at this codebase called adapters with the **leaf** id
+(`bcm`) instead of the full registry path (`vehicle/body/bcm`), which would
+have broken the Phase 4 proxy adapter. This rebuild passes the **full path**
+to every `sovd_vtable_t` call from day one (`server/src/routes.cpp`); each
+adapter decides what to do with it. Nothing left to fix here — just don't
+regress it when Phase 2/4 adapters are added.
 
 ---
 

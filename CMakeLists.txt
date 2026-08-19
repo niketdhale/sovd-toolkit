@@ -60,7 +60,18 @@ if(SOVD_ADAPTER_MOCK)
 endif()
 
 if(SOVD_ADAPTER_UDS_DOIP)
-    message(FATAL_ERROR "SOVD_ADAPTER_UDS_DOIP is a Phase 2 target and not implemented yet")
+    add_library(sovd_adapter_uds_doip STATIC
+        adapters/uds_doip/src/doip_protocol.cpp
+        adapters/uds_doip/src/doip_transport.cpp
+        adapters/uds_doip/src/uds_services.cpp
+        adapters/uds_doip/src/nrc_map.cpp
+        adapters/uds_doip/src/session_manager.cpp
+        adapters/uds_doip/src/uds_doip_adapter.cpp
+    )
+    target_include_directories(sovd_adapter_uds_doip PUBLIC adapters/uds_doip/include)
+    target_include_directories(sovd_adapter_uds_doip PRIVATE third_party)
+    target_link_libraries(sovd_adapter_uds_doip PUBLIC sovd_core sovd_catalog Threads::Threads)
+    list(APPEND SOVD_ADAPTER_LIBS sovd_adapter_uds_doip)
 endif()
 
 # --- server: HTTP layer, no diagnostic logic ---
@@ -81,3 +92,13 @@ target_include_directories(test_core PRIVATE tests adapters/mock)
 target_link_libraries(test_core PRIVATE sovd_server_lib sovd_catalog ${SOVD_ADAPTER_LIBS} Threads::Threads)
 target_compile_definitions(test_core PRIVATE SOVD_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME test_core COMMAND test_core)
+
+# Live socket tests for adapters/uds_doip, built only alongside the adapter
+# itself — the default (mock-only) build stays hermetic with no socket I/O.
+if(SOVD_ADAPTER_UDS_DOIP)
+    add_executable(test_uds_doip tests/test_uds_doip.cpp)
+    target_include_directories(test_uds_doip PRIVATE tests third_party)
+    target_link_libraries(test_uds_doip PRIVATE sovd_adapter_uds_doip sovd_server_lib Threads::Threads)
+    target_compile_definitions(test_uds_doip PRIVATE SOVD_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    add_test(NAME test_uds_doip COMMAND test_uds_doip)
+endif()

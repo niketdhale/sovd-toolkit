@@ -14,3 +14,7 @@ cmake --build build -j4
 ./build/sovd_server 20002 domain       # port, role
 cd build && ctest --output-on-failure
 ```
+
+Add `-DSOVD_ADAPTER_UDS_DOIP=ON` to also build the real UDS/DoIP adapter and
+its socket-level tests (`./build/test_uds_doip`, 180 assertions) against an
+in-repo fault-injecting DoIP test server.

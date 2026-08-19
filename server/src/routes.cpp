@@ -48,6 +48,8 @@ int http_status_for(sovd_result_t r) {
         case SOVD_TRANSPORT:
         case SOVD_NEGATIVE_RESPONSE: return 502;
         case SOVD_INTERNAL: return 500;
+        case SOVD_FORBIDDEN: return 403;
+        case SOVD_CONFLICT: return 409;
     }
     return 500;
 }
@@ -533,6 +535,18 @@ void Router::handle_delete_lock(const httplib::Request &req, httplib::Response &
 
     switch (locks_.release(path, lock_id)) {
         case LockReleaseResult::Released:
+            // Session lifetime follows lock lifetime (CLAUDE.md's "Session
+            // manager ownership"): tear down whatever session-like state
+            // the backend opened for this lock, via the same set_mode
+            // entry point a client could call directly. core/server never
+            // learn a UDS session exists — this just fires the existing
+            // mode-change hook. Best-effort: the lock is already released
+            // either way, so the result isn't surfaced to the client (a
+            // failed/slow backend teardown shouldn't turn a successful
+            // unlock into an error response).
+            if (e->vtable && e->vtable->set_mode) {
+                e->vtable->set_mode(e->adapter_ctx, path.c_str(), "default");
+            }
             emit_event(event_sink_, "lock_released", {{"entity", path}, {"lock_id", lock_id}, {"correlation_id", corr}});
             res.status = 204;
             break;

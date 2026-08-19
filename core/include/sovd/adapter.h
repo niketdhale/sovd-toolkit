@@ -28,7 +28,12 @@ typedef enum sovd_result_t {
     SOVD_BUSY,
     SOVD_TRANSPORT,
     SOVD_NEGATIVE_RESPONSE,
-    SOVD_INTERNAL
+    SOVD_INTERNAL,
+    /* Added for Phase 2 (adapters/uds_doip/nrc_map): the mock never needed
+     * these, but real UDS NRCs do — securityAccessDenied and
+     * conditionsNotCorrect have no honest fit among the codes above. */
+    SOVD_FORBIDDEN, /* -> HTTP 403, e.g. UDS 0x33 securityAccessDenied */
+    SOVD_CONFLICT   /* -> HTTP 409, e.g. UDS 0x22 conditionsNotCorrect */
 } sovd_result_t;
 
 /* Owned by whoever the vtable's free_buffer says owns it (the adapter, via

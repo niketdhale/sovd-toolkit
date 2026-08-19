@@ -81,6 +81,7 @@ External tester  ──SOVD/HTTP──►  Gateway / Domain HPC
 | Streaming | SSE, not WebSocket, initially | One-directional, simpler, proxy-friendly |
 | OTX | **Deferred, possibly forever** | No mature OSS runtime; ISO 13209-2 interpreter is a project in itself |
 | API versioning | **Path prefix** `/v1/`, not `Accept` header | Uglier but unambiguous — trivial to add now, breaks every deployed tester later if skipped. `/` itself stays unversioned (version-discovery: a client hits it first to learn `api_versions` before it knows which prefix to use); everything else is under `/v1/`. Settled 2026-08-19, implemented in `server/src/routes.cpp`. |
+| Session manager ownership | **Object per-adapter, lifetime per-lock** | Not strictly either option as originally framed — see below. Settled 2026-08-19. |
 
 ### Deliberate non-goals
 - Software update / flash orchestration (large, demonstrates nothing new)
@@ -88,11 +89,39 @@ External tester  ──SOVD/HTTP──►  Gateway / Domain HPC
 - OTX runtime (especially Scenario B server-side triggering)
 - Full spec coverage of every SOVD resource class
 
-### One decision STILL OPEN (settle before Phase 2)
-1. **Session manager ownership** — per-adapter or per-lock? Per-lock is
-   conceptually cleaner (session lifetime = lock lifetime) but unlocked
-   read-only requests then need a transient session path. **This shapes the
-   whole DoIP module.**
+### Session manager ownership — resolved
+The `SessionManager` *object* is owned per-adapter-instance (one per ECU,
+created alongside the adapter context, tracking whatever sessions that ECU's
+DIDs/operations need) — not per-lock, since a per-lock object would mean
+recreating heartbeat-thread machinery on every lock acquisition for no
+benefit. What actually varies with the lock is the session's **operational
+state** (default vs. escalated):
+
+- Session escalation only ever happens from a **lock-gated** call
+  (`write_data`, `set_mode`, `execute_operation`) checking the DID/operation's
+  catalog `requires_session` field — never from an unlocked `read_data`. This
+  isn't just convenience: escalating an ECU's session as a side effect of an
+  *unauthenticated-feeling* read would be a real gap in a safety-adjacent
+  interface, so reads always run in whatever session already happens to be
+  active and never request escalation themselves.
+- Teardown is driven by the **existing `set_mode` vtable hook** — no new
+  vtable surface needed. `routes.cpp`'s `handle_delete_lock` calls
+  `vtable->set_mode(ctx, path, "default")` on a successful release, and the
+  adapter's `set_mode("default")` implementation is what actually reverts the
+  UDS session and stops the heartbeat. `core/`/`server/` never learn a UDS
+  session exists; they're just calling the same mode-change entry point a
+  client could call directly.
+- A silently **expired lock** (TTL elapses, no explicit `DELETE /locks`) has
+  no event to hook — `LockManager` doesn't push expiry notifications. The
+  session manager instead runs its own idle-timeout safety net: if no
+  lock-gated call touches a given ECU's session within a configured window,
+  it reverts to default and stops heartbeating on its own. This mirrors how
+  real ECUs already behave (UDS S3 session timeout) rather than inventing new
+  cross-module plumbing for a case the protocol already handles.
+
+This resolves the tension in the original framing ("unlocked read-only
+requests need a transient session path"): they don't need one, because they
+never escalate in the first place.
 
 ---
 
@@ -110,7 +139,16 @@ sovd-toolkit/
 │   │   └── lock_manager.hpp
 │   └── src/{adapter.c, entity_registry.cpp, lock_manager.cpp}
 ├── adapters/
-│   └── mock/               # in-memory, extern "C" only (supplier pattern)
+│   ├── mock/               # in-memory, extern "C" only (supplier pattern)
+│   └── uds_doip/           # real UDS/DoIP backend, built via -DSOVD_ADAPTER_UDS_DOIP=ON
+│       ├── include/sovd/uds_doip/
+│       │   ├── doip_protocol.hpp    # DoIP header/payload framing, pure logic
+│       │   ├── doip_transport.hpp   # TCP transport: routing activation, send/ack/receive
+│       │   ├── uds_services.hpp     # UDS request/response encode/decode, pure logic
+│       │   ├── nrc_map.hpp          # NRC -> sovd_result_t
+│       │   ├── session_manager.hpp  # session escalation + 0x3E heartbeat
+│       │   └── uds_doip_adapter.h   # extern "C" vtable accessor (supplier pattern)
+│       └── src/{same names}.cpp
 ├── catalog/                 # DID/operation YAML defs — shared by server & adapters
 │   ├── include/sovd/catalog/did_catalog.hpp
 │   └── src/did_catalog.cpp
@@ -120,8 +158,10 @@ sovd-toolkit/
 │   ├── include/sovd/server/routes.hpp
 │   └── src/{main.cpp, routes.cpp}
 ├── tests/
-│   ├── test_framework.hpp  # minimal harness, no external dep
-│   └── test_core.cpp       # 245 assertions
+│   ├── test_framework.hpp     # minimal harness, no external dep
+│   ├── test_core.cpp          # 245 assertions (mock path, default build)
+│   ├── fake_doip_server.hpp   # in-repo fault-injecting DoIP/UDS test fixture
+│   └── test_uds_doip.cpp      # 180 assertions, built only when SOVD_ADAPTER_UDS_DOIP=ON
 └── third_party/            # vendored single headers
     ├── httplib.h           # cpp-httplib v0.18.3 (MIT)
     └── json.hpp            # nlohmann/json v3.11.3 (MIT)
@@ -136,8 +176,11 @@ flow-style support at all).
 **Layering rule:** `server/` translates HTTP ⇄ core calls and nothing more.
 `core/` holds no I/O. All backend complexity hides behind `adapter.h`.
 `catalog/` is data/logic only (no HTTP, no adapter-specific behavior) —
-shared between `server/` (Phase 1 `/docs`) and `adapters/uds_doip/` (Phase 2
-encode/decode).
+shared between `server/` (Phase 1 `/docs`, named data paths) and
+`adapters/uds_doip/` (Phase 2: each adapter instance loads its own `Catalog`
+to decide session escalation and `0x2E`-vs-`0x2F` dispatch — a second,
+independent use of the same module for a different question, not a shared
+runtime instance; see Phase 2 below).
 
 ---
 
@@ -156,8 +199,22 @@ Adapter selection at **configure** time:
 cmake -S . -B build -DSOVD_ADAPTER_MOCK=ON -DSOVD_ADAPTER_UDS_DOIP=OFF
 ```
 
-Builds clean under `-Wall -Wextra -Wpedantic` with zero warnings. Keep it that
-way.
+With the DoIP adapter on, a second test binary builds and runs socket-level
+tests against the in-repo fake DoIP server:
+```bash
+cmake -S . -B build -DSOVD_ADAPTER_UDS_DOIP=ON
+cmake --build build -j4
+./build/test_uds_doip                  # 180 assertions
+```
+`SOVD_ADAPTER_MOCK=OFF` alongside `SOVD_ADAPTER_UDS_DOIP=ON` builds the
+adapter library and its tests fine on their own, but currently breaks
+`sovd_server`/`test_core` — they call `sovd_mock_adapter_vtable()`
+unconditionally regardless of the flag. Pre-existing since Phase 0, not a
+Phase 2 regression; matches Phase 8's still-unbuilt "restricted gateway
+build (no ECU adapters linked)" item.
+
+Builds clean under `-Wall -Wextra -Wpedantic` with zero warnings in every
+configuration above. Keep it that way.
 
 ---
 
@@ -383,57 +440,125 @@ GET /entities/vehicle/body/bcm/data/battery_voltage
 
 ---
 
-## Phase 2 — UDS/DoIP adapter (real hardware path)
+## Phase 2 — UDS/DoIP adapter (real hardware path) — COMPLETE ✅
+
+Verified: clean warning-free build (both `-DSOVD_ADAPTER_UDS_DOIP=ON` and the
+default mock-only config — the two don't interfere with each other, and
+`SOVD_ADAPTER_UDS_DOIP=ON`/`SOVD_ADAPTER_MOCK=OFF` builds and links the
+adapter fine in isolation too), 425 total assertions passing across
+`test_core` (245) and `test_uds_doip` (180, only built/run when the option is
+on), including a true end-to-end test: real HTTP → `server/routes.cpp` → the
+real `uds_doip` adapter → the fake DoIP server, reproducing the Phase 1
+worked example (`battery_voltage` → 13.0 V) through production code instead
+of the mock, plus a full lock → write (IOControl) → operation (session
+escalation) → release (session teardown) sequence over real HTTP.
 
 All complexity hides behind the vtable; `core/` and route handlers never learn
 UDS exists.
 
 ```
 adapters/uds_doip/
-├── doip_transport    — socket, routing activation, ISO-TP segmentation
-├── session_manager   — per-ECU session state + 0x3E TesterPresent heartbeat
-├── nrc_map           — UDS negative response → sovd_result_t
-└── did_catalog       — shared with Phase 1 (encode/decode)
+├── doip_protocol      — DoIP header/payload framing, pure logic, no sockets
+├── doip_transport     — TCP socket, routing activation, message send/ack/receive
+├── uds_services        — UDS request/response encode/decode, pure logic
+├── session_manager    — per-ECU session state + 0x3E TesterPresent heartbeat
+├── nrc_map            — UDS negative response → sovd_result_t
+└── uds_doip_adapter   — wires the above + a Catalog instance into sovd_vtable_t
 ```
 
-### SOVD → UDS service mapping
+Not literally the file layout originally sketched (`did_catalog` isn't a
+separate file here — the adapter loads its own `sovd::catalog::Catalog`
+instance via `catalog/`, already built in Phase 1, rather than duplicating
+that logic) and `uds_services`/`doip_protocol` weren't in the original sketch
+at all — pure encode/decode logic split out from the transport so it's
+unit-testable without a socket, same instinct as the rest of this project.
+
+### SOVD → UDS service mapping — implemented as documented, with two corrections
 | SOVD request | UDS service |
 |---|---|
 | `GET /data/{id}` | `0x22` ReadDataByIdentifier |
-| `PUT /data/{id}` | `0x2E` WriteDataByIdentifier |
-| `PUT /data/{id}` (actuator) | `0x2F` InputOutputControlByIdentifier |
+| `PUT /data/{id}` | `0x2E` WriteDataByIdentifier, or `0x2F` IOControlByIdentifier if the catalog's `io_control: true` |
 | `GET /faults` | `0x19` ReadDTCInformation (sub `0x02`) |
 | `DELETE /faults` | `0x14` ClearDiagnosticInformation |
-| `POST /modes` | `0x10` DiagnosticSessionControl |
-| `POST /operations/{id}` | `0x31` RoutineControl |
-| software update | `0x34`/`0x36`/`0x37` (deferred) |
+| `POST /modes` | `0x10` DiagnosticSessionControl — also how `routes.cpp` tears a session down on lock release (`set_mode(ctx, path, "default")`), not just a client-visible operation |
+| `POST /operations/{id}` | `0x31` RoutineControl (`Start` only — `RequestResults`-backed async polling is a stated non-goal, see below) |
+| software update | `0x34`/`0x36`/`0x37` (deferred, unchanged) |
 | `POST /locks` | **nothing** — pure SOVD concept |
-| *(none)* | `0x3E` TesterPresent — adapter generates internally on a timer |
+| *(none)* | `0x3E` TesterPresent — heartbeat thread, **not** suppressed-response: the DoIP-level ack alone isn't a liveness signal, and the transport already waits for a follow-up message regardless, so a real `0x7E` back is free and doubles as a dead-ECU check |
 
 ### The four hard problems
-1. **Stateless HTTP vs stateful UDS sessions** — session state machine per ECU
-   keyed off the SOVD lock: acquire lock → open extended session → spawn `0x3E`
-   heartbeat → hold until release/TTL. Client never sees it.
-   *Most common way a real SOVD gateway breaks.*
-2. **`0x27` SecurityAccess** — no SOVD equivalent. Translate HTTP scope
-   (`flash:write`) → seed/key exchange. Gateway becomes holder of ECU
-   credentials → reinforces the restricted-build decision.
-3. **Semantic gap** — `0x22` returns opaque bytes; SOVD returns typed values.
-   Catalog-driven decode (scaling, endianness, bit layout, enums). Least
-   glamorous, most laborious part of any real implementation.
-4. **`0x78` response-pending** — loop internally, surface HTTP only once
-   resolved. Plus ISO-TP multi-frame entirely below the SOVD line.
+1. **Stateless HTTP vs stateful UDS sessions** — done, but the actual shape
+   is "object per-adapter, lifetime per-lock," not literally "keyed off the
+   SOVD lock" as first framed — see "Session manager ownership — resolved"
+   above for the full reasoning and why unlocked reads never escalate.
+2. **`0x27` SecurityAccess** — the *mechanism* is done and tested in
+   isolation (`uds_services`: requestSeed/sendKey encode/decode, plus
+   `derive_key_DEMO_ONLY_NOT_SECURE` — a clearly-labeled stand-in, since real
+   UDS key derivation is OEM-proprietary and secret). **Not wired into the
+   adapter's live read/write path** — deliberately, not an oversight: there
+   is no HTTP scope concept anywhere in this codebase yet (Phase 8, unbuilt)
+   to translate from, and the catalog schema has no field analogous to
+   `requires_session` for "requires this security level" to trigger it from.
+   Wiring it up for real means picking one of those two things first, which
+   is a design decision bigger than "finish Phase 2," not a buried
+   implementation detail to decide here.
+3. **Semantic gap** — Phase 1's catalog-driven `decode()` already handles
+   scaling/endianness/enums; Phase 2's addition is dispatching `0x2E` vs
+   `0x2F` off the catalog's `io_control` flag, which is real and tested.
+4. **`0x78` response-pending** — done: a bounded retry loop (`send_and_
+   resolve` in `uds_doip_adapter.cpp`, capped at 10 attempts) waits for
+   follow-up diagnostic messages with no new request sent, matching how a
+   real ECU actually behaves after `0x78`. Capped rather than unbounded — a
+   perpetually-pending ECU is itself a fault worth surfacing (as `SOVD_BUSY`)
+   rather than hanging the caller forever.
+   **Correction to the original framing:** "ISO-TP multi-frame ... below the
+   SOVD line" doesn't apply to a DoIP-over-TCP client. ISO-TP (ISO 15765-2)
+   segments messages for CAN's 8-byte frames; DoIP's own length-prefixed
+   framing already carries arbitrarily-sized messages natively over TCP, and
+   ISO-TP segmentation (if it happens at all) is internal to the physical
+   gateway when it relays onto the CAN bus — transparent to a DoIP client.
+   `doip_transport` does need correct length-prefixed TCP reassembly (built,
+   tested against truncated/malformed frames), just not ISO-TP itself.
 
 ### NRC → HTTP
 `0x33` securityAccessDenied → 403 · `0x31` requestOutOfRange → 400 ·
 `0x22` conditionsNotCorrect → 409 · `0x78` responsePending → handled
-internally, **never surfaced** · timeout/no response → 502
+internally, **never surfaced** · timeout/no response → 502 — implemented in
+`nrc_map`, extended to the rest of the standard NRC table (`0x11`/`0x12`→501,
+`0x13`→400, `0x24`→409, `0x35`→403, `0x36`/`0x37`→503, unenumerated→500).
+**Required extending `sovd_result_t`** (`core/include/sovd/adapter.h`): the
+Phase 0 enum had no way to produce 403 or 409 at all — added `SOVD_FORBIDDEN`
+and `SOVD_CONFLICT`. A real, necessary, backward-compatible seam extension,
+not scope creep — the mock never needed this vocabulary, real UDS does.
 
-### Testing prerequisite
-**Build a fault-injecting DoIP simulator BEFORE the session manager.** Extend
-`DoIP_ECU_Simulator` to misbehave on demand (timeouts, `0x78` storms, truncated
-frames, NRCs). Otherwise you debug against a simulator that never reproduces
-the failure.
+### Testing prerequisite — done, with one clarification
+**Build a fault-injecting DoIP simulator BEFORE the session manager.** Done in
+that order. `tests/fake_doip_server.hpp` is a minimal in-repo test fixture
+(routing activation, configurable request→response table, and injectable
+fault modes: no-response, malformed frame, truncated frame, NRC storm,
+response-pending storm, routing-activation-denied) — speaking the same
+`doip_protocol` framing the real transport uses, so it can't drift from what
+the client actually parses. **This is not `DoIP_ECU_Simulator`** — that's a
+separate repo of the owner's that wasn't available to this build; the fixture
+exists so the "build the simulator first" constraint is satisfiable without
+it. If `DoIP_ECU_Simulator` is later extended with equivalent fault
+injection, it's a straightforward drop-in replacement for socket-level
+testing — `doip_transport`'s tests only depend on it speaking correct DoIP
+framing, not on anything fixture-specific.
+
+### What's deliberately not built
+- Multi-DID `ReadDataByIdentifier` (UDS supports requesting several DIDs in
+  one `0x22` message) — Phase 1's batch read already works correctly against
+  this adapter, just as N separate requests; a real optimization, not
+  attempted here.
+- `RequestResults`-backed async routine polling — matches the project's
+  stated non-goal on async job polling.
+- SecurityAccess wired into the live path — see hard problem #2 above.
+- Wiring this adapter into `main.cpp`'s demo topology — there's no live (or
+  appropriate-to-ship-alongside) DoIP target for the default `sovd_server`
+  binary to point at. Phase 4's config loader is the natural place a real
+  deployment wires this in against a real or per-deployment-configured
+  target.
 
 ---
 
@@ -579,7 +704,13 @@ read/clear, (3) data table read/write with typed widgets from catalog,
   core, the design is wrong
 - New adapters implement `adapter.h` and nothing else; leave unsupported
   function pointers NULL rather than returning stub data
-- Tests must not sleep — use the injectable clock
+- Tests must not sleep — use the injectable clock. One narrow, documented
+  exception: `session_manager`'s heartbeat/idle-timeout is a genuine
+  wall-clock-driven background thread (not a lazily-checked TTL like
+  `LockManager`), so its tests use short real intervals with bounded polling
+  instead. Don't extend that exception to anything that could use an
+  injectable clock instead — it's a real tradeoff made once for a case that
+  needed it, not a precedent.
 - Env note: owner's other projects are Windows/PowerShell (`;` not `&&`) and
   Bun-based; **this project is Linux/CMake/C++ and does not use Bun**
 

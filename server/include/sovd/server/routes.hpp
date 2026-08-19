@@ -31,6 +31,11 @@ public:
     void register_routes(httplib::Server &svr);
     void set_event_sink(EventSink sink);
 
+    // Phase 3: operational telemetry (per-request latency) is a *separate*
+    // sink from set_event_sink's security-relevant events — "an IDS should
+    // not be your APM" (CLAUDE.md). Same stdout-by-default seam either way.
+    void set_telemetry_sink(EventSink sink);
+
     // Associates a DID catalog with an entity path, enabling named data
     // paths (/data/battery_voltage) and typed /docs output for it. Catalogs
     // are per-ECU-software-version, kept separate from topology (see
@@ -74,6 +79,7 @@ private:
     std::string role_;
     std::unordered_map<std::string, catalog::Catalog> catalogs_;
     EventSink event_sink_;
+    EventSink telemetry_sink_;
 };
 
 } // namespace sovd::server

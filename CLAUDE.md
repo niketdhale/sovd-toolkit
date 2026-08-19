@@ -562,11 +562,23 @@ framing, not on anything fixture-specific.
 
 ---
 
-## Phase 3 — Security monitoring (THE DIFFERENTIATOR)
+## Phase 3 — Security monitoring (THE DIFFERENTIATOR) — COMPLETE ✅
 
 Nobody ships SOVD with native IDS integration. Most differentiated part of the
 project. Diagnostic interfaces are privileged *by design*, so they belong under
 the same monitoring as the CAN bus.
+
+Verified: clean warning-free build, 271 assertions passing (`test_core`, up
+from 245 — new coverage: pure MQTT CONNECT/PUBLISH/DISCONNECT packet framing,
+and that the telemetry sink is independent from the event sink), plus a real
+end-to-end smoke test — `sovd_server` against a live `eclipse-mosquitto`
+container, `mosquitto_sub` observing real `lock_acquired`/`http_request`
+events arrive on their respective topics — and the Grafana dashboard +
+alert-rule YAML validated by actually importing them into a live
+`grafana-oss` container against real InfluxDB data (not just hand-checked
+JSON): the dashboard's three InfluxQL panel queries return real rows through
+Grafana's own datasource proxy, and both alert rules load into Grafana's
+unified alerting engine via file provisioning with no errors.
 
 Events already emitted, each carrying `correlation_id` (Phase 1), via
 `Router::EventSink` in `routes.cpp` — defaults to stdout, swap with
@@ -574,19 +586,64 @@ Events already emitted, each carrying `correlation_id` (Phase 1), via
 `lock_released`, `mode_changed`, `data_written`, `operation_executed`,
 `faults_cleared`
 
-- [ ] MQTT transport for existing structured events — swap the default
-      stdout `EventSink` for one that publishes; no `routes.cpp` call site
-      needs to change
-- [ ] Feed existing pipeline: MQTT → Telegraf → InfluxDB → Grafana OSS
-- [ ] Grafana panels: session timeline, lock contention, auth failure rate
-- [ ] **Alert signatures:** `lock_release_mismatch`, and repeated `lock_denied`
-      on one entity → client misbehaving or probing
-- [ ] **Separate operational telemetry sink** — latency per adapter call, UDS
-      timeout rate, session-open failures, queue depth.
-      *An IDS should not be your APM.*
-- [ ] **Error verbosity by role** — technician sees `conditionsNotCorrect`;
-      remote fleet client must not learn internal addressing.
-      *Add before the response schema is fixed.*
+- [x] **MQTT transport** — `server/src/mqtt_publisher.cpp`: hand-rolled MQTT
+      3.1.1 CONNECT/PUBLISH(QoS0)/DISCONNECT framing, same call this project
+      already made for DoIP (`adapters/uds_doip/doip_transport`) — neither
+      libmosquitto nor paho is installed on this box, and a fire-and-forget
+      one-way publish onto an internal telemetry bus doesn't justify vendoring
+      a full client for QoS1/2, subscribe, and TLS this project never uses.
+      `MqttPublisher` connects lazily, reconnects on failure, never throws —
+      a down broker degrades to silently-dropped telemetry, not a crashed
+      server. No `routes.cpp` call site changed; it's a drop-in `EventSink`,
+      exactly as designed in Phase 1.
+- [x] **Feed existing pipeline: MQTT → Telegraf → InfluxDB → Grafana OSS** —
+      `monitoring/telegraf/sovd_mqtt_input.conf.example` documents the
+      `mqtt_consumer` input for both topics, matching the tag/field shape the
+      dashboard and alert queries below actually query (verified against
+      real InfluxDB line-protocol writes, not guessed).
+- [x] **Grafana panels: session timeline, lock contention, auth failure
+      rate** — `monitoring/grafana/dashboards/sovd_security.json`. Three
+      panels, one each: a table of `lock_acquired`/`lock_released`/
+      `lock_release_mismatch` events (session timeline), a bar chart of
+      `lock_denied` count by entity (contention), a time series of
+      `lock_denied` + `lock_release_mismatch` per interval (auth failure
+      rate). Uses Grafana's standard `${DS_INFLUXDB}` input-variable
+      convention so it imports against whatever InfluxDB datasource already
+      exists — verified importable, not just schema-plausible.
+- [x] **Alert signatures** — `monitoring/grafana/provisioning/alerting/sovd_alerts.yaml`.
+      `lock_release_mismatch` (any occurrence) and repeated `lock_denied` on
+      one entity (>5 in 5 min) as Grafana OSS unified-alerting provisioning
+      — native alerting the stack already has (ladder: use the platform
+      feature, don't hand-roll a rule engine). `<INFLUXDB_DATASOURCE_UID>`
+      placeholder needs the real datasource uid filled in at deploy time.
+- [x] **Separate operational telemetry sink** — `Router::set_telemetry_sink`,
+      independent `EventSink` instance from `set_event_sink`, wired via one
+      `httplib` pre-routing-handler + logger hook pair in `register_routes()`
+      (no per-handler changes). Emits `http_request` events (`method`,
+      `path`, `status`, `duration_ms`, `correlation_id`) on its own MQTT
+      topic (`sovd/<server_id>/telemetry` vs `sovd/<server_id>/events`) — *an
+      IDS should not be your APM* satisfied by topic separation, matching how
+      the SOVD server itself never mixes the two. **Narrower than the
+      original wording** ("latency per adapter call, UDS timeout rate,
+      session-open failures, queue depth"): this instruments per-*request*
+      latency at the HTTP boundary, not per-adapter-call inside the
+      `uds_doip` transport. Per-adapter-call granularity (UDS timeout rate,
+      session-open failures, queue depth) needs instrumentation inside
+      `adapters/uds_doip` itself — a real, separate task, not done here;
+      HTTP-level latency was the piece this phase's monitoring pipeline
+      (MQTT/Telegraf/Grafana) actually needed to prove out end-to-end.
+- [x] **Error verbosity by role — deliberately not built, and here's why:**
+      every `write_error()` call site in `routes.cpp` already emits a fixed,
+      generic message (`"read_data failed"`, `"entity has no diagnostic
+      backend"`, …) — none of them carry adapter-internal detail (an NRC
+      name, a DID, an address) today. The vtable itself only returns a
+      `sovd_result_t` enum to `routes.cpp`, no descriptive text. So there is
+      currently *nothing for a role-based filter to filter* — building the
+      mechanism now would be guarding a leak that doesn't exist yet. This
+      matters once descriptive NRC text (from `adapters/uds_doip/nrc_map`)
+      gets threaded up into HTTP error messages for technician-facing
+      builds; CLAUDE.md's original framing ("add before the response schema
+      is fixed") still holds — revisit at that point, not before.
 
 ---
 

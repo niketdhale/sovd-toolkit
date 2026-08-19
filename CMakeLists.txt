@@ -77,6 +77,7 @@ endif()
 # --- server: HTTP layer, no diagnostic logic ---
 add_library(sovd_server_lib STATIC
     server/src/routes.cpp
+    server/src/mqtt_publisher.cpp
 )
 target_include_directories(sovd_server_lib PUBLIC server/include third_party)
 target_link_libraries(sovd_server_lib PUBLIC sovd_core sovd_catalog Threads::Threads)

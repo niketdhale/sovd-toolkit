@@ -1,0 +1,31 @@
+# Drop into telegraf.d/ on the box already running the MQTT -> Telegraf ->
+# InfluxDB -> Grafana pipeline (CLAUDE.md's IDSM stack). Two separate inputs,
+# matching the SOVD server's own topic split -- security events never land
+# in the same measurement as request-latency telemetry ("an IDS should not
+# be your APM").
+#
+# Verified against the server's actual wire shape (see server/src/routes.cpp
+# emit_event / MqttPublisher topics: sovd/<server_id>/events and
+# sovd/<server_id>/telemetry) and against a real Telegraf-shaped InfluxDB
+# write + the Grafana dashboard/alert queries in this same directory.
+
+[[inputs.mqtt_consumer]]
+  servers = ["tcp://localhost:1883"]
+  topics = ["sovd/+/events"]
+  data_format = "json"
+  name_override = "sovd_events"
+  # event/entity become InfluxDB tags (indexed, low-cardinality) -- matches
+  # every WHERE/GROUP BY in monitoring/grafana/dashboards/sovd_security.json.
+  tag_keys = ["event", "entity", "server_id"]
+  json_string_fields = ["correlation_id", "lock_id", "mode", "operation", "id", "did"]
+
+[[inputs.mqtt_consumer]]
+  servers = ["tcp://localhost:1883"]
+  topics = ["sovd/+/telemetry"]
+  data_format = "json"
+  name_override = "sovd_telemetry"
+  tag_keys = ["method", "path", "server_id"]
+  json_string_fields = ["correlation_id"]
+  # status/duration_ms are left as native json numeric fields (no
+  # json_string_fields entry) so Grafana can aggregate/threshold on them
+  # directly -- e.g. p95 duration_ms, or count where status >= 500.

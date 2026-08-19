@@ -9,6 +9,7 @@
 #include "sovd/catalog/did_catalog.hpp"
 #include "sovd/entity_registry.hpp"
 #include "sovd/lock_manager.hpp"
+#include "sovd/server/mqtt_publisher.hpp"
 #include "sovd/server/routes.hpp"
 #include "test_framework.hpp"
 
@@ -806,6 +807,80 @@ void test_http_named_data_path_put_readonly_guard_and_write() {
     ASSERT_EQ(json::parse(after->body)["value"].get<std::string>(), "deadlocked");
 }
 
+void test_http_telemetry_sink_separate_from_event_sink() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    std::vector<std::string> events;
+    std::vector<std::string> telemetry;
+    ts.router.set_event_sink([&events](const std::string &line) { events.push_back(line); });
+    ts.router.set_telemetry_sink([&telemetry](const std::string &line) { telemetry.push_back(line); });
+
+    auto res = cli.Get("/v1/entities");
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(res->status, 200);
+
+    // httplib's set_logger() (which telemetry_sink_ is wired through) fires
+    // *after* the response body is already written to the socket -- unlike
+    // set_event_sink(), which handlers call before res.status is even set.
+    // So the client can legitimately observe the response before the
+    // server-side logger call runs; a bounded poll (not a blind sleep) is
+    // the same real-async-hazard tradeoff CLAUDE.md documents for
+    // session_manager's heartbeat tests, applied to a different cause.
+    for (int waited_ms = 0; telemetry.empty() && waited_ms < 200; waited_ms += 5) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    // A plain GET emits no security event, but does emit telemetry -- the
+    // two sinks are independent (CLAUDE.md: "an IDS should not be your APM").
+    ASSERT_EQ(events.size(), static_cast<size_t>(0));
+    ASSERT_EQ(telemetry.size(), static_cast<size_t>(1));
+
+    json evt = json::parse(telemetry[0]);
+    ASSERT_EQ(evt["event"].get<std::string>(), "http_request");
+    ASSERT_EQ(evt["method"].get<std::string>(), "GET");
+    ASSERT_EQ(evt["path"].get<std::string>(), "/v1/entities");
+    ASSERT_EQ(evt["status"].get<int>(), 200);
+    ASSERT_TRUE(evt["duration_ms"].get<double>() >= 0.0);
+}
+
+// Pure MQTT packet framing -- no socket, no broker. Matches the
+// doip_protocol precedent: wire-format encode/decode is unit-testable on
+// its own, independent of the transport that carries it.
+void test_mqtt_encode_connect_packet() {
+    auto pkt = sovd::server::mqtt::encode_connect("client-42", 60);
+    ASSERT_EQ(pkt[0], static_cast<uint8_t>(0x10)); // CONNECT
+    // Variable header + payload: "MQTT" (2+4) + level(1) + flags(1) + keepalive(2) + "client-42" (2+9) = 21
+    ASSERT_EQ(pkt[1], static_cast<uint8_t>(21));
+    ASSERT_EQ(pkt.size(), static_cast<size_t>(23));
+    ASSERT_EQ(pkt[2], static_cast<uint8_t>(0x00));
+    ASSERT_EQ(pkt[3], static_cast<uint8_t>(0x04));
+    ASSERT_EQ(std::string(pkt.begin() + 4, pkt.begin() + 8), "MQTT");
+    ASSERT_EQ(pkt[8], static_cast<uint8_t>(0x04)); // protocol level 3.1.1
+    ASSERT_EQ(pkt[9], static_cast<uint8_t>(0x02)); // clean session
+    ASSERT_EQ(pkt[10], static_cast<uint8_t>(0x00));
+    ASSERT_EQ(pkt[11], static_cast<uint8_t>(60)); // keep-alive
+    ASSERT_EQ(std::string(pkt.end() - 9, pkt.end()), "client-42");
+}
+
+void test_mqtt_encode_publish_packet() {
+    std::string topic_str = "sovd/demo/events"; // 16 chars
+    std::string payload_str = "{\"event\":\"x\"}"; // 13 chars
+    auto pkt = sovd::server::mqtt::encode_publish(topic_str, payload_str);
+    ASSERT_EQ(pkt[0], static_cast<uint8_t>(0x30)); // PUBLISH, QoS0
+    std::string topic(pkt.begin() + 2 + 2, pkt.begin() + 2 + 2 + static_cast<long>(topic_str.size()));
+    ASSERT_EQ(topic, topic_str);
+    std::string payload(pkt.end() - static_cast<long>(payload_str.size()), pkt.end());
+    ASSERT_EQ(payload, payload_str);
+}
+
+void test_mqtt_encode_disconnect_packet() {
+    auto pkt = sovd::server::mqtt::encode_disconnect();
+    ASSERT_EQ(pkt.size(), static_cast<size_t>(2));
+    ASSERT_EQ(pkt[0], static_cast<uint8_t>(0xE0));
+    ASSERT_EQ(pkt[1], static_cast<uint8_t>(0x00));
+}
+
 // ---------------------------------------------------------------------
 
 int main() {
@@ -860,6 +935,11 @@ int main() {
     RUN_TEST(test_http_batch_data_read_requires_ids_param);
     RUN_TEST(test_http_batch_data_read_501_on_no_backend);
     RUN_TEST(test_http_named_data_path_put_readonly_guard_and_write);
+    RUN_TEST(test_http_telemetry_sink_separate_from_event_sink);
+
+    RUN_TEST(test_mqtt_encode_connect_packet);
+    RUN_TEST(test_mqtt_encode_publish_packet);
+    RUN_TEST(test_mqtt_encode_disconnect_packet);
 
     return testfw::summary();
 }

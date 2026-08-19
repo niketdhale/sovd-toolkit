@@ -126,6 +126,16 @@ DataReadOutcome read_one_data_item(const Entity &e, const std::string &path, con
     return out;
 }
 
+// httplib runs pre_routing_handler and set_logger sequentially on the same
+// worker thread for a given request (routing() -> process_request() is
+// synchronous per-connection), so a thread_local timestamp is enough to
+// carry request start time through to the logger without threading it
+// through every handler or touching response headers.
+std::chrono::steady_clock::time_point &request_start() {
+    thread_local std::chrono::steady_clock::time_point t;
+    return t;
+}
+
 bool from_hex(std::string s, std::vector<uint8_t> &out) {
     if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s = s.substr(2);
     if (s.empty() || s.size() % 2 != 0) return false;
@@ -150,9 +160,11 @@ bool from_hex(std::string s, std::vector<uint8_t> &out) {
 
 Router::Router(EntityRegistry &registry, LockManager &locks, std::string server_id, std::string role)
     : registry_(registry), locks_(locks), server_id_(std::move(server_id)), role_(std::move(role)),
-      event_sink_([](const std::string &line) { std::cout << line << std::endl; }) {}
+      event_sink_([](const std::string &line) { std::cout << line << std::endl; }),
+      telemetry_sink_([](const std::string &line) { std::cout << line << std::endl; }) {}
 
 void Router::set_event_sink(EventSink sink) { event_sink_ = std::move(sink); }
+void Router::set_telemetry_sink(EventSink sink) { telemetry_sink_ = std::move(sink); }
 
 std::string Router::correlation_id_for(const httplib::Request &req, httplib::Response &res) const {
     std::string id = req.get_header_value("X-SOVD-Correlation-Id");
@@ -168,6 +180,25 @@ void Router::register_routes(httplib::Server &svr) {
     // path prefix over an Accept header, settled in CLAUDE.md: uglier, but
     // unambiguous, and safety-adjacent APIs shouldn't leave version
     // negotiation implicit.
+    // Phase 3: per-request latency on a separate telemetry sink, not mixed
+    // into the security event stream (CLAUDE.md: "an IDS should not be your
+    // APM"). One hook pair here covers every route without instrumenting
+    // each handler individually.
+    svr.set_pre_routing_handler([](const httplib::Request &, httplib::Response &) {
+        request_start() = std::chrono::steady_clock::now();
+        return httplib::Server::HandlerResponse::Unhandled;
+    });
+    svr.set_logger([this](const httplib::Request &req, const httplib::Response &res) {
+        double duration_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - request_start()).count();
+        emit_event(telemetry_sink_, "http_request",
+                   {{"method", req.method},
+                    {"path", req.path},
+                    {"status", res.status},
+                    {"duration_ms", duration_ms},
+                    {"correlation_id", res.get_header_value("X-SOVD-Correlation-Id")}});
+    });
+
     svr.Get("/", [this](const httplib::Request &req, httplib::Response &res) { handle_root(req, res); });
     svr.Get("/v1/entities",
             [this](const httplib::Request &req, httplib::Response &res) { handle_list_entities(req, res); });

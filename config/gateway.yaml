@@ -1,0 +1,31 @@
+# Gateway-tier server (Phase 4 two-tier demo): no ECU-facing adapter, no DID
+# catalogs at all (CLAUDE.md) -- every leaf entity is proxied to
+# config/domain_body.yaml's server instead. Run both on one host:
+#   ./sovd_server config/domain_body.yaml   (port 20003)
+#   ./sovd_server config/gateway.yaml       (port 20002)
+# then hit the gateway; /docs and named data reads come back fully typed
+# even though this server never parsed catalogs/bcm.yaml itself.
+server:
+  id: sovd-gateway
+  port: 20002
+  role: gateway
+
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/body
+    type: area
+  - path: vehicle/body/bcm
+    type: component
+    adapter:
+      kind: sovd_proxy
+      base_url: http://127.0.0.1:20003
+      remote_path: vehicle/body/bcm
+      forward_locks: true
+  - path: vehicle/body/door_ctrl
+    type: component
+    adapter:
+      kind: sovd_proxy
+      base_url: http://127.0.0.1:20003
+      remote_path: vehicle/body/door_ctrl
+      forward_locks: true

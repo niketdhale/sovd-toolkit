@@ -1,0 +1,25 @@
+# Domain-tier server (Phase 4 two-tier demo): owns the real backends. Uses
+# the mock adapter, not uds_doip -- there's no live DoIP target to ship
+# alongside this demo (same call Phase 2 already made; see CLAUDE.md).
+# Swap `kind: mock` for `kind: uds_doip` (+ its gateway_ip/logical_address
+# fields) to point this at a real ECU without touching the gateway config
+# at all -- that's the whole point of the adapter seam.
+server:
+  id: sovd-body-domain
+  port: 20003
+  role: domain
+
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/body
+    type: area
+  - path: vehicle/body/bcm
+    type: component
+    adapter:
+      kind: mock
+      did_catalog: catalogs/bcm.yaml
+  - path: vehicle/body/door_ctrl
+    type: component
+    adapter:
+      kind: mock

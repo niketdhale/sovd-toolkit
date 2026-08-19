@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
 
@@ -7,6 +8,7 @@
 #include "sovd/catalog/did_catalog.hpp"
 #include "sovd/entity_registry.hpp"
 #include "sovd/lock_manager.hpp"
+#include "sovd/server/config_loader.hpp"
 #include "sovd/server/mqtt_publisher.hpp"
 #include "sovd/server/routes.hpp"
 
@@ -14,7 +16,9 @@ using namespace sovd;
 
 namespace {
 
-// Hardcoded demo topology. Replaced by the YAML config loader in Phase 4.
+// Hardcoded zero-config demo topology, used when argv[1] isn't a config
+// file (see main()). Phase 4 adds the YAML-driven path alongside this, not
+// instead of it -- `./sovd_server` with no args still needs to just work.
 void build_topology(EntityRegistry &registry) {
     const sovd_vtable_t *mock = sovd_mock_adapter_vtable();
 
@@ -32,28 +36,66 @@ void build_topology(EntityRegistry &registry) {
 } // namespace
 
 int main(int argc, char **argv) {
-    int port = 20002;
-    std::string role = "domain";
-    if (argc > 1) port = std::atoi(argv[1]);
-    if (argc > 2) role = argv[2];
+    // Phase 4: `./sovd_server <config.yaml>` loads a topology; anything
+    // else (no args, or `./sovd_server <port> [role]`) keeps the original
+    // hardcoded demo unchanged — an existing-regular-file check is enough
+    // to tell them apart without an argv-parsing library for one flag's
+    // worth of ambiguity.
+    bool config_mode = false;
+    if (argc > 1) {
+        std::ifstream probe(argv[1]);
+        config_mode = probe.good();
+    }
 
     EntityRegistry registry;
-    build_topology(registry);
     LockManager locks;
-
     httplib::Server svr;
+
+    // Router needs a server_id/role at construction, but in config mode
+    // those only become known once load_topology_from_file() below has
+    // parsed the `server:` block -- placeholders here, corrected via
+    // set_server_id()/set_role() before svr.listen() starts accepting
+    // requests (see routes.hpp's comment on those setters).
     std::string server_id = "sovd-demo";
+    std::string role = "domain";
+    int port = 20002;
     sovd::server::Router router(registry, locks, server_id, role);
     router.register_routes(svr);
 
-    // Phase 3: MQTT is opt-in via env var, not config-loaded (Phase 4's
-    // topology loader doesn't exist yet) — unset means stdout, same as
-    // before, so `./sovd_server` still runs with no broker required.
-    // Two publishers, two topics: security events stay separate from
+    if (config_mode) {
+        try {
+            sovd::server::ServerConfig cfg = sovd::server::load_topology_from_file(argv[1], registry, router);
+            server_id = cfg.id;
+            role = cfg.role;
+            port = cfg.port;
+            router.set_server_id(server_id);
+            router.set_role(role);
+        } catch (const sovd::server::ConfigError &ex) {
+            std::cerr << "config error: " << ex.what() << std::endl;
+            return 1;
+        }
+    } else {
+        build_topology(registry);
+        if (argc > 1) port = std::atoi(argv[1]);
+        if (argc > 2) role = argv[2];
+        router.set_role(role);
+
+        // Catalog is per-ECU-software-version data, loaded independently of
+        // topology (see CLAUDE.md). Hardcoded to bcm for this demo
+        // topology; config mode reads `did_catalog:` per entity instead.
+        try {
+            router.attach_catalog("vehicle/body/bcm", catalog::Catalog::load_from_file("catalogs/bcm.yaml"));
+        } catch (const catalog::CatalogError &ex) {
+            std::cerr << "warning: failed to load catalogs/bcm.yaml: " << ex.what() << std::endl;
+        }
+    }
+
+    // MQTT is opt-in via env var regardless of mode — unset means stdout,
+    // so `./sovd_server` still runs with no broker required. Two
+    // publishers, two topics: security events stay separate from
     // per-request telemetry ("an IDS should not be your APM", CLAUDE.md).
-    // server_id in the topic path means Phase 4's multi-server topology
-    // needs no rework here — each server already publishes under its own
-    // name.
+    // server_id in the topic path means multi-server topology needs no
+    // rework here — each server already publishes under its own name.
     if (const char *mqtt_host = std::getenv("SOVD_MQTT_HOST")) {
         int mqtt_port = 1883;
         if (const char *p = std::getenv("SOVD_MQTT_PORT")) mqtt_port = std::atoi(p);
@@ -69,16 +111,7 @@ int main(int argc, char **argv) {
         std::cout << "MQTT event/telemetry publishing to " << mqtt_host << ":" << mqtt_port << std::endl;
     }
 
-    // Catalog is per-ECU-software-version data, loaded independently of
-    // topology (see CLAUDE.md). Hardcoded to bcm for this demo topology;
-    // Phase 4's config loader will read `did_catalog:` per entity instead.
-    try {
-        router.attach_catalog("vehicle/body/bcm", catalog::Catalog::load_from_file("catalogs/bcm.yaml"));
-    } catch (const catalog::CatalogError &ex) {
-        std::cerr << "warning: failed to load catalogs/bcm.yaml: " << ex.what() << std::endl;
-    }
-
-    std::cout << "sovd_server listening on :" << port << " role=" << role << std::endl;
+    std::cout << "sovd_server listening on :" << port << " role=" << role << " id=" << server_id << std::endl;
     if (!svr.listen("0.0.0.0", port)) {
         std::cerr << "failed to bind port " << port << std::endl;
         return 1;

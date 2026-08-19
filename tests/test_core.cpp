@@ -1,6 +1,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <sstream>
 #include <thread>
 
 #include "httplib.h"
@@ -9,6 +10,7 @@
 #include "sovd/catalog/did_catalog.hpp"
 #include "sovd/entity_registry.hpp"
 #include "sovd/lock_manager.hpp"
+#include "sovd/server/config_loader.hpp"
 #include "sovd/server/mqtt_publisher.hpp"
 #include "sovd/server/routes.hpp"
 #include "test_framework.hpp"
@@ -453,6 +455,32 @@ struct TestServer {
     }
 };
 
+// Phase 4: a second, smaller live-server fixture whose topology comes from
+// load_topology_from_string() instead of being hardcoded -- kept separate
+// from TestServer rather than adding a YAML-or-hardcoded mode to it, since
+// only the config_loader tests below need this shape.
+struct ConfigLoadedServer {
+    EntityRegistry registry;
+    LockManager locks;
+    httplib::Server svr;
+    sovd::server::Router router;
+    std::thread thread;
+    int port = 0;
+
+    explicit ConfigLoadedServer(const std::string &yaml_text) : router(registry, locks, "placeholder", "domain") {
+        router.register_routes(svr);
+        sovd::server::load_topology_from_string(yaml_text, registry, router);
+        port = svr.bind_to_any_port("127.0.0.1");
+        thread = std::thread([this] { svr.listen_after_bind(); });
+        svr.wait_until_ready();
+    }
+
+    ~ConfigLoadedServer() {
+        svr.stop();
+        thread.join();
+    }
+};
+
 void test_http_root_and_entities() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
@@ -882,6 +910,249 @@ void test_mqtt_encode_disconnect_packet() {
 }
 
 // ---------------------------------------------------------------------
+// Phase 4: config_loader (YAML -> registry/router) and proxy forwarding.
+
+using sovd::server::ConfigError;
+using sovd::server::load_topology_from_string;
+using sovd::server::ServerConfig;
+
+void test_config_loader_basic_topology_and_mock_adapter() {
+    EntityRegistry registry;
+    LockManager locks;
+    sovd::server::Router router(registry, locks, "placeholder", "domain");
+
+    ServerConfig cfg = load_topology_from_string(R"(
+server: {id: sovd-test-domain, port: 20099, role: domain}
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/body
+    type: area
+  - path: vehicle/body/bcm
+    type: component
+    adapter: { kind: mock }
+)",
+                                                  registry, router);
+    ASSERT_EQ(cfg.id, "sovd-test-domain");
+    ASSERT_EQ(cfg.port, 20099);
+    ASSERT_EQ(cfg.role, "domain");
+
+    const Entity *bcm = registry.find("vehicle/body/bcm");
+    ASSERT_TRUE(bcm != nullptr);
+    ASSERT_TRUE(bcm->has_backend());
+
+    const Entity *body = registry.find("vehicle/body");
+    ASSERT_TRUE(body != nullptr);
+    ASSERT_FALSE(body->has_backend()); // grouping node: no adapter block
+}
+
+void test_config_loader_rejects_missing_server_block() {
+    EntityRegistry registry;
+    LockManager locks;
+    sovd::server::Router router(registry, locks, "placeholder", "domain");
+    bool threw = false;
+    try {
+        load_topology_from_string("entities: []", registry, router);
+    } catch (const ConfigError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+void test_config_loader_rejects_orphan_entity() {
+    EntityRegistry registry;
+    LockManager locks;
+    sovd::server::Router router(registry, locks, "placeholder", "domain");
+    bool threw = false;
+    try {
+        // "vehicle" (the parent) is never listed -- orphan rejection.
+        load_topology_from_string(R"(
+server: {id: x, port: 1, role: domain}
+entities:
+  - path: vehicle/body
+    type: area
+)",
+                                   registry, router);
+    } catch (const ConfigError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+void test_config_loader_unknown_adapter_kind_falls_back_to_grouping_node() {
+    EntityRegistry registry;
+    LockManager locks;
+    sovd::server::Router router(registry, locks, "placeholder", "domain");
+    load_topology_from_string(R"(
+server: {id: x, port: 1, role: domain}
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/thing
+    type: component
+    adapter: { kind: nonexistent_kind }
+)",
+                               registry, router);
+    const Entity *e = registry.find("vehicle/thing");
+    ASSERT_TRUE(e != nullptr);
+    ASSERT_FALSE(e->has_backend()); // degrades to 501-on-diagnostics, not a crash or aborted load
+}
+
+void test_config_loader_sovd_proxy_requires_base_url() {
+    EntityRegistry registry;
+    LockManager locks;
+    sovd::server::Router router(registry, locks, "placeholder", "domain");
+    bool threw = false;
+    try {
+        load_topology_from_string(R"(
+server: {id: x, port: 1, role: domain}
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/bcm
+    type: component
+    adapter: { kind: sovd_proxy, remote_path: vehicle/bcm }
+)",
+                                   registry, router);
+    } catch (const ConfigError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+// The real Phase 4 exit criterion: two live servers, gateway config-loaded
+// with a sovd_proxy pointing at the domain server's dynamic port. Proves
+// the properties CLAUDE.md's original vtable-based sketch couldn't have
+// (see ProxyTarget's comment in routes.hpp): typed /docs and named-id
+// decode pass through with zero catalog on the gateway, and locks acquired
+// through the gateway are actually held on the domain server, not cached
+// locally.
+void test_config_loader_proxy_forwards_docs_data_and_locks() {
+    ConfigLoadedServer domain(R"(
+server: {id: sovd-domain-test, port: 0, role: domain}
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/body
+    type: area
+  - path: vehicle/body/bcm
+    type: component
+    adapter: { kind: mock }
+)");
+    domain.router.attach_catalog("vehicle/body/bcm", Catalog::load_from_string(kSampleCatalogYaml));
+
+    std::ostringstream gw_yaml;
+    gw_yaml << "server: {id: sovd-gateway-test, port: 0, role: gateway}\n"
+               "entities:\n"
+               "  - path: vehicle\n"
+               "    type: vehicle\n"
+               "  - path: vehicle/body\n"
+               "    type: area\n"
+               "  - path: vehicle/body/bcm\n"
+               "    type: component\n"
+               "    adapter:\n"
+               "      kind: sovd_proxy\n"
+               "      base_url: http://127.0.0.1:"
+            << domain.port
+            << "\n"
+               "      remote_path: vehicle/body/bcm\n"
+               "      forward_locks: true\n";
+    ConfigLoadedServer gateway(gw_yaml.str());
+
+    httplib::Client cli("127.0.0.1", gateway.port);
+
+    // /docs has no local catalog to render from -- it's forwarded, and the
+    // domain's real typed catalog comes back through the gateway.
+    auto docs = cli.Get("/v1/entities/vehicle/body/bcm/docs");
+    ASSERT_TRUE(docs != nullptr);
+    ASSERT_EQ(docs->status, 200);
+    json docs_body = json::parse(docs->body);
+    bool found_battery = false;
+    for (auto &item : docs_body["data"]) {
+        if (item["id"] == "battery_voltage") found_battery = true;
+    }
+    ASSERT_TRUE(found_battery);
+
+    // Named-id read through the gateway returns the domain's typed decode
+    // (not raw hex -- the gateway has no catalog to decode with itself).
+    auto read = cli.Get("/v1/entities/vehicle/body/bcm/data/battery_voltage");
+    ASSERT_TRUE(read != nullptr);
+    ASSERT_EQ(read->status, 200);
+    json read_body = json::parse(read->body);
+    ASSERT_TRUE(std::abs(read_body["value"].get<double>() - 13.0) < 1e-9);
+    ASSERT_EQ(read_body["unit"].get<std::string>(), "V");
+
+    // A lock acquired through the gateway is held on the domain server --
+    // proof forward_locks isn't a local no-op. The domain server itself
+    // now refuses a second lock on the same entity.
+    auto lock_res = cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    ASSERT_TRUE(lock_res != nullptr);
+    ASSERT_EQ(lock_res->status, 201);
+    std::string lock_id = json::parse(lock_res->body)["lock_id"].get<std::string>();
+
+    httplib::Client domain_cli("127.0.0.1", domain.port);
+    auto conflict = domain_cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    ASSERT_TRUE(conflict != nullptr);
+    ASSERT_EQ(conflict->status, 423);
+
+    httplib::Headers unlock_headers = {{"X-SOVD-Lock-Id", lock_id}};
+    auto unlock = cli.Delete("/v1/entities/vehicle/body/bcm/locks/" + lock_id, unlock_headers);
+    ASSERT_TRUE(unlock != nullptr);
+    ASSERT_EQ(unlock->status, 204);
+}
+
+// Graceful degradation: one entity's proxy target being unreachable fails
+// only requests aimed at that entity -- not GET /entities (which never
+// calls any backend, proxied or not) and not a second, independent entity.
+void test_config_loader_unreachable_proxy_degrades_gracefully() {
+    ConfigLoadedServer gateway(R"(
+server: {id: sovd-gateway-degraded-test, port: 0, role: gateway}
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/body
+    type: area
+  - path: vehicle/body/bcm
+    type: component
+    adapter:
+      kind: sovd_proxy
+      base_url: http://127.0.0.1:1
+      remote_path: vehicle/body/bcm
+  - path: vehicle/body/door_ctrl
+    type: component
+    adapter: { kind: mock }
+)");
+    httplib::Client cli("127.0.0.1", gateway.port);
+
+    // The unreachable entity's own request fails cleanly (502), not a hang
+    // or a crash.
+    auto bad = cli.Get("/v1/entities/vehicle/body/bcm/data/010A");
+    ASSERT_TRUE(bad != nullptr);
+    ASSERT_EQ(bad->status, 502);
+
+    // Listing still works and still lists it (has_backend reflects the
+    // proxy attachment even though the remote is down).
+    auto list = cli.Get("/v1/entities");
+    ASSERT_TRUE(list != nullptr);
+    ASSERT_EQ(list->status, 200);
+    json items = json::parse(list->body)["items"];
+    bool bcm_listed = false;
+    for (auto &item : items) {
+        if (item["path"] == "vehicle/body/bcm") {
+            bcm_listed = true;
+            ASSERT_TRUE(item["has_backend"].get<bool>());
+        }
+    }
+    ASSERT_TRUE(bcm_listed);
+
+    // A second, independent entity (real mock backend, no proxy involved)
+    // is completely unaffected.
+    auto ok = cli.Get("/v1/entities/vehicle/body/door_ctrl/data/0200");
+    ASSERT_TRUE(ok != nullptr);
+    ASSERT_EQ(ok->status, 200);
+}
+
+// ---------------------------------------------------------------------
 
 int main() {
     RUN_TEST(test_registry_add_and_find_root);
@@ -940,6 +1211,14 @@ int main() {
     RUN_TEST(test_mqtt_encode_connect_packet);
     RUN_TEST(test_mqtt_encode_publish_packet);
     RUN_TEST(test_mqtt_encode_disconnect_packet);
+
+    RUN_TEST(test_config_loader_basic_topology_and_mock_adapter);
+    RUN_TEST(test_config_loader_rejects_missing_server_block);
+    RUN_TEST(test_config_loader_rejects_orphan_entity);
+    RUN_TEST(test_config_loader_unknown_adapter_kind_falls_back_to_grouping_node);
+    RUN_TEST(test_config_loader_sovd_proxy_requires_base_url);
+    RUN_TEST(test_config_loader_proxy_forwards_docs_data_and_locks);
+    RUN_TEST(test_config_loader_unreachable_proxy_degrades_gracefully);
 
     return testfw::summary();
 }

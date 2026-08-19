@@ -82,15 +82,28 @@ add_library(sovd_server_lib STATIC
 target_include_directories(sovd_server_lib PUBLIC server/include third_party)
 target_link_libraries(sovd_server_lib PUBLIC sovd_core sovd_catalog Threads::Threads)
 
+# --- config loader (Phase 4): YAML topology -> registry/router. Instantiates
+# concrete adapters directly (same responsibility main.cpp's hardcoded
+# build_topology() already had), so it's a separate target from
+# sovd_server_lib rather than baked into it — sovd_server_lib stays
+# adapter-agnostic per CLAUDE.md's layering rule, and this is shared by both
+# sovd_server and test_core instead of duplicating the source in each.
+add_library(sovd_config_loader STATIC server/src/config_loader.cpp)
+target_include_directories(sovd_config_loader PRIVATE adapters/mock)
+target_link_libraries(sovd_config_loader PUBLIC sovd_server_lib sovd_catalog ${SOVD_ADAPTER_LIBS})
+if(SOVD_ADAPTER_UDS_DOIP)
+    target_compile_definitions(sovd_config_loader PRIVATE SOVD_HAVE_UDS_DOIP=1)
+endif()
+
 add_executable(sovd_server server/src/main.cpp)
 target_include_directories(sovd_server PRIVATE adapters/mock)
-target_link_libraries(sovd_server PRIVATE sovd_server_lib ${SOVD_ADAPTER_LIBS})
+target_link_libraries(sovd_server PRIVATE sovd_server_lib sovd_config_loader ${SOVD_ADAPTER_LIBS})
 
 # --- tests ---
 enable_testing()
 add_executable(test_core tests/test_core.cpp)
 target_include_directories(test_core PRIVATE tests adapters/mock)
-target_link_libraries(test_core PRIVATE sovd_server_lib sovd_catalog ${SOVD_ADAPTER_LIBS} Threads::Threads)
+target_link_libraries(test_core PRIVATE sovd_server_lib sovd_config_loader sovd_catalog ${SOVD_ADAPTER_LIBS} Threads::Threads)
 target_compile_definitions(test_core PRIVATE SOVD_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 add_test(NAME test_core COMMAND test_core)
 

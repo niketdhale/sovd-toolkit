@@ -154,12 +154,19 @@ sovd-toolkit/
 │   └── src/did_catalog.cpp
 ├── catalogs/                 # actual per-ECU catalog YAML files (data, not code)
 │   └── bcm.yaml
+├── config/                  # Phase 4: topology YAML for the two-tier demo
+│   ├── domain_body.yaml         # domain tier, port 20003, mock-backed
+│   └── gateway.yaml             # gateway tier, port 20002, sovd_proxy-backed
 ├── server/                 # C++ HTTP layer — NO diagnostic logic
-│   ├── include/sovd/server/routes.hpp
-│   └── src/{main.cpp, routes.cpp}
+│   ├── include/sovd/server/{routes.hpp, config_loader.hpp, mqtt_publisher.hpp}
+│   └── src/{main.cpp, routes.cpp, config_loader.cpp, mqtt_publisher.cpp}
+├── monitoring/              # Phase 3: Grafana dashboard/alerts, Telegraf input
+│   ├── grafana/dashboards/sovd_security.json
+│   ├── grafana/provisioning/alerting/sovd_alerts.yaml
+│   └── telegraf/sovd_mqtt_input.conf.example
 ├── tests/
 │   ├── test_framework.hpp     # minimal harness, no external dep
-│   ├── test_core.cpp          # 245 assertions (mock path, default build)
+│   ├── test_core.cpp          # 304 assertions (mock path, default build)
 │   ├── fake_doip_server.hpp   # in-repo fault-injecting DoIP/UDS test fixture
 │   └── test_uds_doip.cpp      # 180 assertions, built only when SOVD_ADAPTER_UDS_DOIP=ON
 └── third_party/            # vendored single headers
@@ -189,9 +196,19 @@ runtime instance; see Phase 2 below).
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
-./build/test_core                      # 245 assertions
-./build/sovd_server 20002 domain       # port, role
+./build/test_core                      # 304 assertions
+./build/sovd_server 20002 domain       # port, role — hardcoded zero-config demo
 cd build && ctest --output-on-failure
+```
+
+Phase 4: `./sovd_server <path-to-existing-file>` loads a YAML topology
+instead — the two are told apart by whether the argument is an openable
+file, not a flag. Two-tier demo, from the repo root (relative
+`did_catalog:`/catalog paths resolve against CWD):
+```bash
+./build/sovd_server config/domain_body.yaml &   # domain tier, :20003
+./build/sovd_server config/gateway.yaml &       # gateway tier, :20002
+curl http://127.0.0.1:20002/v1/entities/vehicle/body/bcm/data/battery_voltage
 ```
 
 Adapter selection at **configure** time:
@@ -647,20 +664,98 @@ Events already emitted, each carrying `correlation_id` (Phase 1), via
 
 ---
 
-## Phase 4 — Multi-server topology
+## Phase 4 — Multi-server topology — COMPLETE ✅
 
-- [ ] **Config loader** — YAML → entity/adapter map, replacing hardcoded
-      `build_topology()`. Delivers the "same binary, different config" property.
-- [ ] **`adapters/sovd_proxy`** — same vtable, emits HTTP to a child SOVD server
-      instead of UDS. Gateway code path becomes identical to an ECU-facing one.
-- [ ] `forward_locks: true` — proxy must **never** cache lock state
-- [ ] Demonstrate two-tier topology on one host, two ports
-- [ ] **Backpressure through the proxy tier** — a saturated domain server must
-      be able to slow the gateway, else the gateway queues until it falls over
-- [ ] **Graceful degradation** — one unreachable ECU must not fail the whole
-      entity listing
-- [ ] Note: gateway needs **no DID catalogs at all** (domain server decodes) —
-      another argument for the restricted build
+Verified: clean warning-free build in both configs, 304 assertions passing
+(`test_core`, up from 271 — new coverage: config loader structural
+validation, and a real two-live-server proxy-forwarding test using dynamic
+ports), plus a genuine two-process demo on one host (`config/domain_body.yaml`
+on :20003, `config/gateway.yaml` on :20002, both against the real
+`sovd_server` binary): `/docs` and named-id data reads return the domain's
+fully typed values through the gateway with curl, a lock acquired through
+the gateway is provably held on the domain server (the domain itself then
+refuses a second lock with 423), and killing the domain server mid-demo
+produces a clean 502 from the gateway on that entity while `/v1/entities`
+and every other entity keep working.
+
+- [x] **Config loader** — `server/src/config_loader.cpp` (`sovd_config_loader`
+      target, shared by `sovd_server` and `test_core`). YAML → entity/adapter
+      map, replacing hardcoded `build_topology()` — but not *instead of* it:
+      `main.cpp` keeps the old hardcoded demo path unchanged for `./sovd_server`
+      with no args or `./sovd_server <port> <role>`; `./sovd_server <path-to-
+      existing-file>` is the new config-driven path. Delivers "same binary,
+      different config" without breaking the zero-config quick-test path
+      Phases 0–3 already relied on. A single misconfigured entity (bad
+      adapter config, unknown adapter kind, adapter not compiled into this
+      binary) degrades to a plain grouping node with a stderr warning rather
+      than aborting the whole topology load or — the real hazard flagged in
+      `uds_doip_adapter.cpp`'s own doc comment — pairing a non-NULL vtable
+      with a NULL adapter context. A genuine structural error (duplicate
+      path, child listed before its parent) still throws `ConfigError`.
+- [x] **Proxying to a child SOVD server — NOT `adapters/sovd_proxy` behind
+      the vtable, as originally sketched. Corrected during the build, same
+      as several Phase 2 items, for a real reason:** the vtable's
+      `read_data` only carries raw `sovd_buffer_t` bytes for local decoding.
+      A proxy has to pass through the remote's *already-decoded* JSON
+      (`battery_voltage` → `13.0 V`) verbatim — and must, since "gateway
+      needs no DID catalogs at all" (below) rules out decoding locally. Worse,
+      `/docs` isn't even reachable through the vtable at all (it's a
+      Router+Catalog concern), so a vtable-shaped proxy would have silently
+      broken typed self-description through the gateway — arguably the
+      whole point of Phase 1. The actual implementation is a Router-level
+      HTTP-forwarding table (`ProxyTarget`, `Router::attach_proxy`/
+      `find_proxy`/`try_forward` in `routes.hpp`/`routes.cpp`): every
+      handler calls `try_forward()` right after `require_entity()`, and if
+      the path is proxied, the *entire* request (method, sub-path suffix,
+      query params, body, `X-SOVD-Lock-Id`/`X-SOVD-Correlation-Id` headers)
+      is forwarded verbatim to `base_url + /v1/entities/<remote_path><suffix>`
+      and the remote's response copied back — one lookup-then-dispatch
+      shape, same as `find_catalog()`, just forwarding instead of decoding.
+      "Gateway code path becomes identical to an ECU-facing one" is
+      preserved in spirit (one table lookup selects the dispatch path) even
+      though it's not literally the same C-ABI struct. A config-loader
+      consequence: `kind: sovd_proxy` is attached **per leaf entity**, not
+      per-area as CLAUDE.md's original schema sketch showed (each leaf gets
+      its own `base_url`/`remote_path`) — the per-entity vtable/dispatch
+      model was never going to support "one adapter covers an entire
+      subtree," sketch or no sketch.
+- [x] `forward_locks: true` — accepted in the YAML for schema fidelity but
+      not actually a toggle: a proxied entity's locks are **always**
+      forwarded, never cached locally, matching "NEVER cache lock state" as
+      a hard rule rather than a configurable option nothing should be
+      allowed to turn off.
+- [x] **Demonstrate two-tier topology on one host, two ports** —
+      `config/domain_body.yaml` (mock-backed, matches Phase 2's own "no live
+      DoIP target to ship alongside this demo" call — swap `kind: mock` for
+      `kind: uds_doip` to point at a real ECU without touching the gateway
+      config at all) + `config/gateway.yaml`. Both curl-verified live (see
+      above) and covered by an automated test
+      (`test_config_loader_proxy_forwards_docs_data_and_locks`) using two
+      real `httplib::Server` instances on dynamic ports.
+- [x] **Backpressure through the proxy tier** — verified as an *existing*
+      property, not new code: `httplib::Server` already runs a bounded
+      `ThreadPool` (not unbounded per-connection threads), and
+      `try_forward()`'s remote call is a blocking `httplib::Client` request
+      on the gateway's own worker thread. A saturated/slow domain server
+      therefore blocks the gateway's finite worker pool directly — new
+      gateway connections queue and eventually block at the accept layer,
+      the standard backpressure shape for a synchronous thread-per-request
+      proxy. Nothing further was built for this; a synthetic queue/limiter
+      on top would duplicate what the thread pool already provides.
+- [x] **Graceful degradation** — one unreachable ECU must not fail the whole
+      entity listing. `GET /v1/entities` never calls any backend (proxied or
+      not) — true since Phase 0, unchanged — so this was already satisfied
+      structurally; verified explicitly by
+      `test_config_loader_unreachable_proxy_degrades_gracefully` (an
+      unreachable proxy target fails only its own entity with a clean 502;
+      the listing and a second, independent mock-backed entity are
+      unaffected) and by the live demo (killing the domain server mid-run).
+- [x] Gateway needs **no DID catalogs at all** — true by construction: the
+      config loader never calls `router.attach_catalog()` for a
+      `sovd_proxy`-kind entity, and `try_forward()` bypasses `find_catalog()`
+      entirely. Demonstrated live: the gateway process never reads
+      `catalogs/bcm.yaml`, yet `/docs` and named-id reads through it are
+      fully typed (see the curl output in this phase's demo).
 
 ---
 

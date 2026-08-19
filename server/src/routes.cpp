@@ -165,6 +165,8 @@ Router::Router(EntityRegistry &registry, LockManager &locks, std::string server_
 
 void Router::set_event_sink(EventSink sink) { event_sink_ = std::move(sink); }
 void Router::set_telemetry_sink(EventSink sink) { telemetry_sink_ = std::move(sink); }
+void Router::set_server_id(std::string id) { server_id_ = std::move(id); }
+void Router::set_role(std::string role) { role_ = std::move(role); }
 
 std::string Router::correlation_id_for(const httplib::Request &req, httplib::Response &res) const {
     std::string id = req.get_header_value("X-SOVD-Correlation-Id");
@@ -252,6 +254,67 @@ const catalog::Catalog *Router::find_catalog(const std::string &entity_path) con
     return &it->second;
 }
 
+void Router::attach_proxy(const std::string &entity_path, ProxyTarget target) {
+    proxies_.insert_or_assign(entity_path, std::move(target));
+}
+
+const ProxyTarget *Router::find_proxy(const std::string &entity_path) const {
+    auto it = proxies_.find(entity_path);
+    if (it == proxies_.end()) return nullptr;
+    return &it->second;
+}
+
+bool Router::try_forward(const httplib::Request &req, httplib::Response &res, const std::string &entity_path) {
+    const ProxyTarget *proxy = find_proxy(entity_path);
+    if (!proxy) return false;
+
+    std::string prefix = "/v1/entities/" + entity_path;
+    std::string suffix = req.path.size() > prefix.size() ? req.path.substr(prefix.size()) : "";
+    std::string remote_url_path = "/v1/entities/" + proxy->remote_path + suffix;
+
+    httplib::Headers headers;
+    std::string lock_id = req.get_header_value("X-SOVD-Lock-Id");
+    if (!lock_id.empty()) headers.emplace("X-SOVD-Lock-Id", lock_id);
+    std::string corr = res.get_header_value("X-SOVD-Correlation-Id"); // stamped by correlation_id_for() already
+    if (!corr.empty()) headers.emplace("X-SOVD-Correlation-Id", corr);
+
+    httplib::Client cli(proxy->base_url);
+    // Connection pooling per adapter is a Phase 8 item (CLAUDE.md); a fresh
+    // client per forwarded request is the right amount of work for Phase 4.
+    cli.set_connection_timeout(2, 0);
+    cli.set_read_timeout(5, 0);
+
+    httplib::Result remote;
+    if (req.method == "GET") {
+        remote = cli.Get(remote_url_path, req.params, headers);
+    } else if (req.method == "PUT") {
+        remote = cli.Put(remote_url_path, headers, req.body, "application/json");
+    } else if (req.method == "POST") {
+        remote = cli.Post(remote_url_path, headers, req.body, "application/json");
+    } else if (req.method == "DELETE") {
+        remote = cli.Delete(remote_url_path, headers);
+    } else {
+        write_error(res, 501, "UNSUPPORTED", "method not proxied: " + req.method);
+        return true;
+    }
+
+    if (!remote) {
+        // Unreachable/timed-out remote -> 502, the same meaning TRANSPORT
+        // already carries for a dead UDS backend, just over HTTP instead of
+        // DoIP. This is also this phase's graceful-degradation guarantee at
+        // the request level: a saturated/down domain server fails only
+        // requests aimed at its own entities, nothing else on this gateway.
+        write_error(res, 502, "TRANSPORT", "upstream SOVD server unreachable: " + proxy->base_url);
+        return true;
+    }
+
+    res.status = remote->status;
+    res.set_content(remote->body, remote->get_header_value("Content-Type", "application/json"));
+    std::string remote_corr = remote->get_header_value("X-SOVD-Correlation-Id");
+    if (!remote_corr.empty()) res.set_header("X-SOVD-Correlation-Id", remote_corr);
+    return true;
+}
+
 const Entity *Router::require_entity(httplib::Response &res, const std::string &path) {
     const Entity *e = registry_.find(path);
     if (!e) {
@@ -288,7 +351,7 @@ void Router::handle_list_entities(const httplib::Request &req, httplib::Response
         items.push_back({
             {"path", e->path},
             {"type", entity_type_to_string(e->type)},
-            {"has_backend", e->has_backend()},
+            {"has_backend", e->has_backend() || find_proxy(e->path) != nullptr},
         });
     }
     res.set_content(json{{"items", items}}.dump(), "application/json");
@@ -298,6 +361,7 @@ void Router::handle_get_faults(const httplib::Request &req, httplib::Response &r
     correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
+    if (try_forward(req, res, path)) return;
     if (!e->vtable || !e->vtable->read_faults) {
         write_error(res, 501, "UNSUPPORTED", "entity has no diagnostic backend");
         return;
@@ -332,6 +396,7 @@ void Router::handle_clear_faults(const httplib::Request &req, httplib::Response 
     std::string corr = correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
+    if (try_forward(req, res, path)) return;
     if (!e->vtable || !e->vtable->clear_faults) {
         write_error(res, 501, "UNSUPPORTED", "entity has no diagnostic backend");
         return;
@@ -353,6 +418,7 @@ void Router::handle_get_data(const httplib::Request &req, httplib::Response &res
     correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
+    if (try_forward(req, res, path)) return;
     if (!e->vtable || !e->vtable->read_data) {
         write_error(res, 501, "UNSUPPORTED", "entity has no diagnostic backend");
         return;
@@ -370,6 +436,7 @@ void Router::handle_get_data_batch(const httplib::Request &req, httplib::Respons
     correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
+    if (try_forward(req, res, path)) return;
     if (!e->vtable || !e->vtable->read_data) {
         write_error(res, 501, "UNSUPPORTED", "entity has no diagnostic backend");
         return;
@@ -408,6 +475,7 @@ void Router::handle_put_data(const httplib::Request &req, httplib::Response &res
     std::string corr = correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
+    if (try_forward(req, res, path)) return;
     if (!e->vtable || !e->vtable->write_data) {
         write_error(res, 501, "UNSUPPORTED", "entity has no diagnostic backend");
         return;
@@ -460,6 +528,7 @@ void Router::handle_post_mode(const httplib::Request &req, httplib::Response &re
     std::string corr = correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
+    if (try_forward(req, res, path)) return;
     if (!e->vtable || !e->vtable->set_mode) {
         write_error(res, 501, "UNSUPPORTED", "entity has no diagnostic backend");
         return;
@@ -494,6 +563,7 @@ void Router::handle_post_operation(const httplib::Request &req, httplib::Respons
     std::string corr = correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
+    if (try_forward(req, res, path)) return;
     if (!e->vtable || !e->vtable->execute_operation) {
         write_error(res, 501, "UNSUPPORTED", "entity has no diagnostic backend");
         return;
@@ -528,6 +598,7 @@ void Router::handle_post_lock(const httplib::Request &req, httplib::Response &re
     std::string corr = correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
+    if (try_forward(req, res, path)) return;
 
     int ttl = 60;
     if (!req.body.empty()) {
@@ -563,6 +634,7 @@ void Router::handle_delete_lock(const httplib::Request &req, httplib::Response &
     std::string corr = correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
+    if (try_forward(req, res, path)) return;
 
     switch (locks_.release(path, lock_id)) {
         case LockReleaseResult::Released:
@@ -596,6 +668,7 @@ void Router::handle_get_docs(const httplib::Request &req, httplib::Response &res
     correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
+    if (try_forward(req, res, path)) return;
 
     json body = {
         {"path", path},

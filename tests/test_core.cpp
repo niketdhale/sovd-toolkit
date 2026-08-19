@@ -170,9 +170,11 @@ void test_mock_adapter_faults_roundtrip() {
     sovd_fault_t *faults = nullptr;
     size_t count = 0;
     ASSERT_TRUE(v->read_faults(ctx, "vehicle/body/bcm", &faults, &count) == SOVD_OK);
-    ASSERT_EQ(count, static_cast<size_t>(1));
+    ASSERT_EQ(count, static_cast<size_t>(2));
     ASSERT_EQ(std::string(faults[0].code), "P0A0F-16");
     ASSERT_EQ(std::string(faults[0].status), "confirmed");
+    ASSERT_EQ(std::string(faults[1].code), "P0420-14");
+    ASSERT_EQ(std::string(faults[1].status), "pending");
     v->free_faults(faults, count);
 
     ASSERT_TRUE(v->clear_faults(ctx, "vehicle/body/bcm") == SOVD_OK);
@@ -459,19 +461,63 @@ void test_http_root_and_entities() {
     ASSERT_EQ(root->status, 200);
     json root_body = json::parse(root->body);
     ASSERT_EQ(root_body["role"].get<std::string>(), "domain");
+    ASSERT_EQ(root_body["api_versions"].size(), static_cast<size_t>(1));
+    ASSERT_EQ(root_body["api_versions"][0].get<std::string>(), "v1");
 
-    auto ents = cli.Get("/entities");
+    auto ents = cli.Get("/v1/entities");
     ASSERT_TRUE(ents != nullptr);
     ASSERT_EQ(ents->status, 200);
     json ents_body = json::parse(ents->body);
     ASSERT_EQ(ents_body["items"].size(), static_cast<size_t>(3));
 }
 
+void test_http_correlation_id_generated_and_echoed() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    // No header supplied -> server generates one.
+    auto generated = cli.Get("/");
+    ASSERT_TRUE(generated != nullptr);
+    std::string gen_id = generated->get_header_value("X-SOVD-Correlation-Id");
+    ASSERT_FALSE(gen_id.empty());
+
+    // Header supplied -> echoed back verbatim, not replaced.
+    httplib::Headers headers = {{"X-SOVD-Correlation-Id", "my-test-id-42"}};
+    auto echoed = cli.Get("/", headers);
+    ASSERT_TRUE(echoed != nullptr);
+    ASSERT_EQ(echoed->get_header_value("X-SOVD-Correlation-Id"), "my-test-id-42");
+
+    // Present on error responses too (404), not just success -- correlation
+    // has to survive a failed request just as much as a successful one.
+    auto not_found = cli.Get("/v1/entities/vehicle/nope/faults", headers);
+    ASSERT_TRUE(not_found != nullptr);
+    ASSERT_EQ(not_found->status, 404);
+    ASSERT_EQ(not_found->get_header_value("X-SOVD-Correlation-Id"), "my-test-id-42");
+}
+
+void test_http_correlation_id_appears_in_emitted_events() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    std::vector<std::string> captured;
+    ts.router.set_event_sink([&captured](const std::string &line) { captured.push_back(line); });
+
+    httplib::Headers headers = {{"X-SOVD-Correlation-Id", "corr-event-test"}};
+    auto del = cli.Delete("/v1/entities/vehicle/body/bcm/faults", headers);
+    ASSERT_TRUE(del != nullptr);
+    ASSERT_EQ(del->status, 204);
+
+    ASSERT_EQ(captured.size(), static_cast<size_t>(1));
+    json evt = json::parse(captured[0]);
+    ASSERT_EQ(evt["event"].get<std::string>(), "faults_cleared");
+    ASSERT_EQ(evt["correlation_id"].get<std::string>(), "corr-event-test");
+}
+
 void test_http_unknown_entity_404() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
 
-    auto res = cli.Get("/entities/vehicle/nope/faults");
+    auto res = cli.Get("/v1/entities/vehicle/nope/faults");
     ASSERT_TRUE(res != nullptr);
     ASSERT_EQ(res->status, 404);
 }
@@ -480,7 +526,7 @@ void test_http_grouping_node_501() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
 
-    auto res = cli.Get("/entities/vehicle/body/data/010A");
+    auto res = cli.Get("/v1/entities/vehicle/body/data/010A");
     ASSERT_TRUE(res != nullptr);
     ASSERT_EQ(res->status, 501);
 }
@@ -489,41 +535,69 @@ void test_http_faults_read_and_clear() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
 
-    auto get1 = cli.Get("/entities/vehicle/body/bcm/faults");
+    auto get1 = cli.Get("/v1/entities/vehicle/body/bcm/faults");
     ASSERT_TRUE(get1 != nullptr);
     ASSERT_EQ(get1->status, 200);
-    ASSERT_EQ(json::parse(get1->body)["faults"].size(), static_cast<size_t>(1));
+    ASSERT_EQ(json::parse(get1->body)["faults"].size(), static_cast<size_t>(2));
 
     // No lock held yet -> clear proceeds without a lock header.
-    auto del = cli.Delete("/entities/vehicle/body/bcm/faults");
+    auto del = cli.Delete("/v1/entities/vehicle/body/bcm/faults");
     ASSERT_TRUE(del != nullptr);
     ASSERT_EQ(del->status, 204);
 
-    auto get2 = cli.Get("/entities/vehicle/body/bcm/faults");
+    auto get2 = cli.Get("/v1/entities/vehicle/body/bcm/faults");
     ASSERT_EQ(json::parse(get2->body)["faults"].size(), static_cast<size_t>(0));
+}
+
+void test_http_faults_status_filter() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto confirmed = cli.Get("/v1/entities/vehicle/body/bcm/faults?status=confirmed");
+    ASSERT_TRUE(confirmed != nullptr);
+    ASSERT_EQ(confirmed->status, 200);
+    json c_body = json::parse(confirmed->body);
+    ASSERT_EQ(c_body["faults"].size(), static_cast<size_t>(1));
+    ASSERT_EQ(c_body["faults"][0]["code"].get<std::string>(), "P0A0F-16");
+
+    auto pending = cli.Get("/v1/entities/vehicle/body/bcm/faults?status=pending");
+    ASSERT_TRUE(pending != nullptr);
+    json p_body = json::parse(pending->body);
+    ASSERT_EQ(p_body["faults"].size(), static_cast<size_t>(1));
+    ASSERT_EQ(p_body["faults"][0]["code"].get<std::string>(), "P0420-14");
+
+    // Valid enum value, just none seeded with it -> empty, not an error.
+    auto test_failed = cli.Get("/v1/entities/vehicle/body/bcm/faults?status=testFailed");
+    ASSERT_TRUE(test_failed != nullptr);
+    ASSERT_EQ(test_failed->status, 200);
+    ASSERT_EQ(json::parse(test_failed->body)["faults"].size(), static_cast<size_t>(0));
+
+    auto invalid = cli.Get("/v1/entities/vehicle/body/bcm/faults?status=bogus");
+    ASSERT_TRUE(invalid != nullptr);
+    ASSERT_EQ(invalid->status, 400);
 }
 
 void test_http_write_data_locked_without_header_423() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
 
-    auto lock_res = cli.Post("/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    auto lock_res = cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
     ASSERT_TRUE(lock_res != nullptr);
     ASSERT_EQ(lock_res->status, 201);
     std::string lock_id = json::parse(lock_res->body)["lock_id"].get<std::string>();
 
     // Write without the lock header while locked -> 423.
-    auto put_unheadered = cli.Put("/entities/vehicle/body/bcm/data/010A", R"({"value":"0064"})", "application/json");
+    auto put_unheadered = cli.Put("/v1/entities/vehicle/body/bcm/data/010A", R"({"value":"0064"})", "application/json");
     ASSERT_TRUE(put_unheadered != nullptr);
     ASSERT_EQ(put_unheadered->status, 423);
 
     // Write with the correct header -> succeeds.
     httplib::Headers headers = {{"X-SOVD-Lock-Id", lock_id}};
-    auto put_ok = cli.Put("/entities/vehicle/body/bcm/data/010A", headers, R"({"value":"0064"})", "application/json");
+    auto put_ok = cli.Put("/v1/entities/vehicle/body/bcm/data/010A", headers, R"({"value":"0064"})", "application/json");
     ASSERT_TRUE(put_ok != nullptr);
     ASSERT_EQ(put_ok->status, 204);
 
-    auto get_after = cli.Get("/entities/vehicle/body/bcm/data/010A");
+    auto get_after = cli.Get("/v1/entities/vehicle/body/bcm/data/010A");
     ASSERT_EQ(json::parse(get_after->body)["value"].get<std::string>(), "0064");
 }
 
@@ -531,24 +605,24 @@ void test_http_lock_conflict_and_release() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
 
-    auto first = cli.Post("/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    auto first = cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
     ASSERT_EQ(first->status, 201);
     std::string lock_id = json::parse(first->body)["lock_id"].get<std::string>();
 
-    auto second = cli.Post("/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    auto second = cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
     ASSERT_TRUE(second != nullptr);
     ASSERT_EQ(second->status, 423); // conflict: already locked
 
-    auto wrong_release = cli.Delete("/entities/vehicle/body/bcm/locks/not-the-holder");
+    auto wrong_release = cli.Delete("/v1/entities/vehicle/body/bcm/locks/not-the-holder");
     ASSERT_TRUE(wrong_release != nullptr);
     ASSERT_EQ(wrong_release->status, 403);
 
-    auto right_release = cli.Delete(("/entities/vehicle/body/bcm/locks/" + lock_id).c_str());
+    auto right_release = cli.Delete(("/v1/entities/vehicle/body/bcm/locks/" + lock_id).c_str());
     ASSERT_TRUE(right_release != nullptr);
     ASSERT_EQ(right_release->status, 204);
 
     // Now unlocked -> a fresh lock can be acquired.
-    auto third = cli.Post("/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    auto third = cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
     ASSERT_EQ(third->status, 201);
 }
 
@@ -556,15 +630,15 @@ void test_http_mode_and_operation() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
 
-    auto lock_res = cli.Post("/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    auto lock_res = cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
     std::string lock_id = json::parse(lock_res->body)["lock_id"].get<std::string>();
     httplib::Headers headers = {{"X-SOVD-Lock-Id", lock_id}};
 
-    auto mode = cli.Post("/entities/vehicle/body/bcm/modes", headers, R"({"mode":"extended"})", "application/json");
+    auto mode = cli.Post("/v1/entities/vehicle/body/bcm/modes", headers, R"({"mode":"extended"})", "application/json");
     ASSERT_TRUE(mode != nullptr);
     ASSERT_EQ(mode->status, 204);
 
-    auto op = cli.Post("/entities/vehicle/body/bcm/operations/self_test", headers, "{}", "application/json");
+    auto op = cli.Post("/v1/entities/vehicle/body/bcm/operations/self_test", headers, "{}", "application/json");
     ASSERT_TRUE(op != nullptr);
     ASSERT_EQ(op->status, 200);
     ASSERT_EQ(json::parse(op->body)["status"].get<std::string>(), "completed");
@@ -574,7 +648,7 @@ void test_http_docs_lists_catalog_data_and_operations() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
 
-    auto res = cli.Get("/entities/vehicle/body/bcm/docs");
+    auto res = cli.Get("/v1/entities/vehicle/body/bcm/docs");
     ASSERT_TRUE(res != nullptr);
     ASSERT_EQ(res->status, 200);
     json body = json::parse(res->body);
@@ -594,6 +668,13 @@ void test_http_docs_lists_catalog_data_and_operations() {
     }
     ASSERT_TRUE(found_voltage);
     ASSERT_EQ(body["operations"][0]["id"].get<std::string>(), "self_test");
+
+    // Mock declares its capabilities honestly: fully synchronous, no
+    // native batch, no distinct IOControl path.
+    ASSERT_TRUE(body.contains("capabilities"));
+    ASSERT_FALSE(body["capabilities"]["supports_batch_read"].get<bool>());
+    ASSERT_FALSE(body["capabilities"]["supports_async_operations"].get<bool>());
+    ASSERT_FALSE(body["capabilities"]["supports_io_control"].get<bool>());
 }
 
 void test_http_docs_empty_for_uncataloged_entity() {
@@ -603,20 +684,21 @@ void test_http_docs_empty_for_uncataloged_entity() {
     // vehicle/body is a grouping node with no catalog attached; /docs still
     // succeeds (it's self-description, not a live diagnostic op), just with
     // empty data/operations.
-    auto res = cli.Get("/entities/vehicle/body/docs");
+    auto res = cli.Get("/v1/entities/vehicle/body/docs");
     ASSERT_TRUE(res != nullptr);
     ASSERT_EQ(res->status, 200);
     json body = json::parse(res->body);
     ASSERT_FALSE(body["has_backend"].get<bool>());
     ASSERT_EQ(body["data"].size(), static_cast<size_t>(0));
     ASSERT_EQ(body["operations"].size(), static_cast<size_t>(0));
+    ASSERT_FALSE(body.contains("capabilities")); // no backend -> nothing to declare
 }
 
 void test_http_named_data_path_decodes_typed_value() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
 
-    auto voltage = cli.Get("/entities/vehicle/body/bcm/data/battery_voltage");
+    auto voltage = cli.Get("/v1/entities/vehicle/body/bcm/data/battery_voltage");
     ASSERT_TRUE(voltage != nullptr);
     ASSERT_EQ(voltage->status, 200);
     json v_body = json::parse(voltage->body);
@@ -625,12 +707,12 @@ void test_http_named_data_path_decodes_typed_value() {
     ASSERT_TRUE(std::abs(v_body["value"].get<double>() - 13.0) < 1e-9);
     ASSERT_EQ(v_body["unit"].get<std::string>(), "V");
 
-    auto lock_state = cli.Get("/entities/vehicle/body/bcm/data/door_lock_state");
+    auto lock_state = cli.Get("/v1/entities/vehicle/body/bcm/data/door_lock_state");
     ASSERT_TRUE(lock_state != nullptr);
     ASSERT_EQ(lock_state->status, 200);
     ASSERT_EQ(json::parse(lock_state->body)["value"].get<std::string>(), "locked");
 
-    auto vin = cli.Get("/entities/vehicle/body/bcm/data/vin");
+    auto vin = cli.Get("/v1/entities/vehicle/body/bcm/data/vin");
     ASSERT_TRUE(vin != nullptr);
     ASSERT_EQ(vin->status, 200);
     ASSERT_EQ(json::parse(vin->body)["value"].get<std::string>(), "SOVDTOOLKITMOCK01");
@@ -642,7 +724,7 @@ void test_http_data_path_falls_back_to_raw_hex_did() {
 
     // "010A" isn't a catalog id, so it's treated as a raw DID (Phase 0
     // behavior) instead of a 404.
-    auto res = cli.Get("/entities/vehicle/body/bcm/data/010A");
+    auto res = cli.Get("/v1/entities/vehicle/body/bcm/data/010A");
     ASSERT_TRUE(res != nullptr);
     ASSERT_EQ(res->status, 200);
     json body = json::parse(res->body);
@@ -651,29 +733,76 @@ void test_http_data_path_falls_back_to_raw_hex_did() {
     ASSERT_FALSE(body.contains("unit"));
 }
 
+void test_http_batch_data_read_mixed_success_and_failure() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    // battery_voltage: named/decoded. 010A: raw DID fallback (same DID,
+    // different resolution path). FFFF: valid hex, but not seeded -> 404
+    // inline, doesn't abort the rest of the batch.
+    auto res = cli.Get("/v1/entities/vehicle/body/bcm/data?ids=battery_voltage,010A,FFFF");
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(res->status, 200);
+    json body = json::parse(res->body);
+    ASSERT_EQ(body["items"].size(), static_cast<size_t>(3));
+
+    ASSERT_EQ(body["items"][0]["id"].get<std::string>(), "battery_voltage");
+    ASSERT_TRUE(std::abs(body["items"][0]["value"].get<double>() - 13.0) < 1e-9);
+    ASSERT_EQ(body["items"][0]["unit"].get<std::string>(), "V");
+
+    ASSERT_EQ(body["items"][1]["id"].get<std::string>(), "010A");
+    ASSERT_EQ(body["items"][1]["value"].get<std::string>(), "32C8");
+
+    ASSERT_EQ(body["items"][2]["id"].get<std::string>(), "FFFF");
+    ASSERT_TRUE(body["items"][2].contains("error"));
+    ASSERT_FALSE(body["items"][2].contains("value"));
+}
+
+void test_http_batch_data_read_requires_ids_param() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto missing = cli.Get("/v1/entities/vehicle/body/bcm/data");
+    ASSERT_TRUE(missing != nullptr);
+    ASSERT_EQ(missing->status, 400);
+
+    auto empty = cli.Get("/v1/entities/vehicle/body/bcm/data?ids=");
+    ASSERT_TRUE(empty != nullptr);
+    ASSERT_EQ(empty->status, 400);
+}
+
+void test_http_batch_data_read_501_on_no_backend() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto res = cli.Get("/v1/entities/vehicle/body/data?ids=anything");
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(res->status, 501);
+}
+
 void test_http_named_data_path_put_readonly_guard_and_write() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
 
-    auto lock_res = cli.Post("/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    auto lock_res = cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
     std::string lock_id = json::parse(lock_res->body)["lock_id"].get<std::string>();
     httplib::Headers headers = {{"X-SOVD-Lock-Id", lock_id}};
 
     // vin is access: read in the catalog -> write is rejected before it
     // ever reaches the adapter.
-    auto readonly = cli.Put("/entities/vehicle/body/bcm/data/vin", headers, R"({"value":"00"})", "application/json");
+    auto readonly = cli.Put("/v1/entities/vehicle/body/bcm/data/vin", headers, R"({"value":"00"})", "application/json");
     ASSERT_TRUE(readonly != nullptr);
     ASSERT_EQ(readonly->status, 400);
 
     // door_lock_state is read_write -> named write succeeds, and a
     // subsequent named read observes it (raw hex wire format, per the
     // catalog's still-hex-only PUT contract).
-    auto write = cli.Put("/entities/vehicle/body/bcm/data/door_lock_state", headers, R"({"value":"02"})",
+    auto write = cli.Put("/v1/entities/vehicle/body/bcm/data/door_lock_state", headers, R"({"value":"02"})",
                           "application/json");
     ASSERT_TRUE(write != nullptr);
     ASSERT_EQ(write->status, 204);
 
-    auto after = cli.Get("/entities/vehicle/body/bcm/data/door_lock_state");
+    auto after = cli.Get("/v1/entities/vehicle/body/bcm/data/door_lock_state");
     ASSERT_EQ(json::parse(after->body)["value"].get<std::string>(), "deadlocked");
 }
 
@@ -713,9 +842,12 @@ int main() {
     RUN_TEST(test_catalog_access_and_type_to_string);
 
     RUN_TEST(test_http_root_and_entities);
+    RUN_TEST(test_http_correlation_id_generated_and_echoed);
+    RUN_TEST(test_http_correlation_id_appears_in_emitted_events);
     RUN_TEST(test_http_unknown_entity_404);
     RUN_TEST(test_http_grouping_node_501);
     RUN_TEST(test_http_faults_read_and_clear);
+    RUN_TEST(test_http_faults_status_filter);
     RUN_TEST(test_http_write_data_locked_without_header_423);
     RUN_TEST(test_http_lock_conflict_and_release);
     RUN_TEST(test_http_mode_and_operation);
@@ -724,6 +856,9 @@ int main() {
     RUN_TEST(test_http_docs_empty_for_uncataloged_entity);
     RUN_TEST(test_http_named_data_path_decodes_typed_value);
     RUN_TEST(test_http_data_path_falls_back_to_raw_hex_did);
+    RUN_TEST(test_http_batch_data_read_mixed_success_and_failure);
+    RUN_TEST(test_http_batch_data_read_requires_ids_param);
+    RUN_TEST(test_http_batch_data_read_501_on_no_backend);
     RUN_TEST(test_http_named_data_path_put_readonly_guard_and_write);
 
     return testfw::summary();

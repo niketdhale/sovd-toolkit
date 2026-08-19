@@ -80,6 +80,7 @@ External tester  ──SOVD/HTTP──►  Gateway / Domain HPC
 | Catalog `id` scope | Per-ECU, **not** cached at proxy | Caching diagnostic reads is wrong — the point is current vehicle state |
 | Streaming | SSE, not WebSocket, initially | One-directional, simpler, proxy-friendly |
 | OTX | **Deferred, possibly forever** | No mature OSS runtime; ISO 13209-2 interpreter is a project in itself |
+| API versioning | **Path prefix** `/v1/`, not `Accept` header | Uglier but unambiguous — trivial to add now, breaks every deployed tester later if skipped. `/` itself stays unversioned (version-discovery: a client hits it first to learn `api_versions` before it knows which prefix to use); everything else is under `/v1/`. Settled 2026-08-19, implemented in `server/src/routes.cpp`. |
 
 ### Deliberate non-goals
 - Software update / flash orchestration (large, demonstrates nothing new)
@@ -87,11 +88,8 @@ External tester  ──SOVD/HTTP──►  Gateway / Domain HPC
 - OTX runtime (especially Scenario B server-side triggering)
 - Full spec coverage of every SOVD resource class
 
-### Two decisions STILL OPEN (settle before Phase 2)
-1. **API versioning scheme** — path prefix (`/v1/`) vs `Accept` header.
-   Path prefix is uglier but unambiguous. *Trivial now, breaks every deployed
-   tester later.*
-2. **Session manager ownership** — per-adapter or per-lock? Per-lock is
+### One decision STILL OPEN (settle before Phase 2)
+1. **Session manager ownership** — per-adapter or per-lock? Per-lock is
    conceptually cleaner (session lifetime = lock lifetime) but unlocked
    read-only requests then need a transient session path. **This shapes the
    whole DoIP module.**
@@ -123,7 +121,7 @@ sovd-toolkit/
 │   └── src/{main.cpp, routes.cpp}
 ├── tests/
 │   ├── test_framework.hpp  # minimal harness, no external dep
-│   └── test_core.cpp       # 195 assertions
+│   └── test_core.cpp       # 245 assertions
 └── third_party/            # vendored single headers
     ├── httplib.h           # cpp-httplib v0.18.3 (MIT)
     └── json.hpp            # nlohmann/json v3.11.3 (MIT)
@@ -148,7 +146,7 @@ encode/decode).
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
-./build/test_core                      # 195 assertions
+./build/test_core                      # 245 assertions
 ./build/sovd_server 20002 domain       # port, role
 cd build && ctest --output-on-failure
 ```
@@ -165,7 +163,7 @@ way.
 
 ## Phase 0 — COMPLETE ✅
 
-Verified: clean warning-free build, 195 assertions passing (`test_core`),
+Verified: clean warning-free build, 245 assertions passing (`test_core`),
 end-to-end HTTP run hitting every expected status code (curl against a live
 `sovd_server`).
 
@@ -183,20 +181,23 @@ end-to-end HTTP run hitting every expected status code (curl against a live
 ### Current API surface
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/` | self-description, role |
-| GET | `/entities` | flat listing with `has_backend` |
-| GET | `/entities/{path}/faults` | |
-| DELETE | `/entities/{path}/faults` | lock-gated |
-| GET | `/entities/{path}/data/{id}` | catalog `id` (e.g. `battery_voltage`) if attached, else raw hex DID |
-| PUT | `/entities/{path}/data/{id}` | lock-gated; same `id`-or-DID resolution; wire value is still hex bytes even for a named `id` (catalog `encode()` not built yet) |
-| POST | `/entities/{path}/modes` | lock-gated, UDS session control |
-| POST | `/entities/{path}/operations/{op}` | lock-gated, UDS RoutineControl |
-| POST | `/entities/{path}/locks` | returns `lock_id` |
-| DELETE | `/entities/{path}/locks/{lock_id}` | |
-| GET | `/entities/{path}/docs` | capability description from the attached catalog (empty `data`/`operations` if none attached); works on any entity, not just ones with a backend |
+| GET | `/` | self-description, role, `api_versions` — deliberately unversioned |
+| GET | `/v1/entities` | flat listing with `has_backend` |
+| GET | `/v1/entities/{path}/faults` | optional `?status=confirmed\|pending\|testFailed` filter |
+| DELETE | `/v1/entities/{path}/faults` | lock-gated |
+| GET | `/v1/entities/{path}/data?ids=a,b,c` | batch read; per-item failure doesn't fail the batch |
+| GET | `/v1/entities/{path}/data/{id}` | catalog `id` (e.g. `battery_voltage`) if attached, else raw hex DID |
+| PUT | `/v1/entities/{path}/data/{id}` | lock-gated; same `id`-or-DID resolution; wire value is still hex bytes even for a named `id` (catalog `encode()` not built yet) |
+| POST | `/v1/entities/{path}/modes` | lock-gated, UDS session control |
+| POST | `/v1/entities/{path}/operations/{op}` | lock-gated, UDS RoutineControl |
+| POST | `/v1/entities/{path}/locks` | returns `lock_id` |
+| DELETE | `/v1/entities/{path}/locks/{lock_id}` | |
+| GET | `/v1/entities/{path}/docs` | capability description from the attached catalog (empty `data`/`operations` if none attached); works on any entity, not just ones with a backend |
 
 `{path}` is a full multi-segment entity path (`vehicle/body/bcm`).
 Lock-gated ops require `X-SOVD-Lock-Id` header when a lock is held.
+Every request gets an `X-SOVD-Correlation-Id` response header — echoed if
+supplied, generated otherwise — regardless of success or error status.
 A named `/data/{id}` GET returns a catalog-decoded typed `value` (string,
 scaled number, or enum label) plus `unit` when applicable; the raw-DID
 fallback returns hex, same as Phase 0. PUT to a catalog `id` with
@@ -227,15 +228,23 @@ regress it when Phase 2/4 adapters are added.
 
 ---
 
-## NEXT UP: Phase 1 — Self-description & usability
+## Phase 1 — Self-description & usability — COMPLETE ✅
 
-**Do this before Phase 2.** The instinct is to reach for real hardware next,
-but `/docs` + typed catalogs + batch read is what makes the client generic.
-Build the DoIP adapter first and you'll write a client hardcoded to the mock's
-DIDs, then have to rewrite it.
+Verified: clean warning-free build, 245 assertions passing (`test_core`),
+plus curl smoke tests against a live `sovd_server` for every item below
+(batch read reproducing the exit criteria exactly, `/docs`, named paths,
+fault filtering, correlation-id echo/generation on both success and error
+responses).
 
-- [ ] **`sovd_capability_t`** extension to the adapter vtable — each backend
-      declares what it supports
+- [x] **`sovd_capability_t`** extension to the adapter vtable — each backend
+      declares what it supports. A static field on `sovd_vtable_t`
+      (`supports_batch_read`, `supports_async_operations`,
+      `supports_io_control`), not a callback — same "declare via linkage,
+      not a runtime query" philosophy as the NULL-fn-ptr capability check.
+      Mock declares all three `false` (it's honest: fully synchronous, no
+      native multi-DID read, no distinct IOControl path). Surfaced in
+      `GET .../docs` as a `capabilities` object when the entity has a
+      backend at all.
 - [x] **DID catalog parser** — YAML → typed definitions (`type`, `encoding`,
       `scale`, `unit`, enum `values`, `access`, `io_control`,
       `requires_session`). `catalog/` module, backed by yaml-cpp. Includes
@@ -255,17 +264,33 @@ DIDs, then have to rewrite it.
       no catalog and just fall back to raw hex, same as Phase 0. PUT still
       takes hex bytes over the wire regardless of `id` vs DID — catalog
       `encode()` (typed value → bytes) remains unbuilt; nothing needs it yet.
-- [ ] **Batch data read** — `GET /data?ids=a,b,c`. Without it, reading 30 live
-      values is 30 HTTP round trips (unusable for real diagnostics)
-- [ ] **Fault filtering** — `?status=confirmed|pending|testFailed`
-- [ ] **API versioning** — settle the open decision above, then implement
-- [ ] **Correlation IDs** — request ID surviving the proxy hop. Clocks may not
-      be synced across gateway/domain HPC, so correlate by ID, **never** by
-      timestamp
+- [x] **Batch data read** — `GET /v1/entities/{path}/data?ids=a,b,c`. Shares
+      the single-item resolve/decode logic (`read_one_data_item` helper in
+      `routes.cpp`) with `GET .../data/{id}`. Partial failure doesn't fail
+      the whole batch — one bad id returns an inline `{"id","error"}` entry
+      alongside the successful ones, same graceful-degradation spirit as
+      Phase 4's "one unreachable ECU must not fail the whole entity listing."
+- [x] **Fault filtering** — `?status=confirmed|pending|testFailed`; invalid
+      value is 400, valid value with no matching faults is 200 + empty
+      array. Mock now seeds two faults with different statuses so this is
+      actually exercised (was one before).
+- [x] **API versioning** — settled: path prefix (`/v1/`), see the settled
+      decisions table above. `/` stays unversioned for version discovery.
+- [x] **Correlation IDs** — `X-SOVD-Correlation-Id`: echoed if the client
+      supplies one, generated (thread-local random, not a counter — a
+      counter is predictable and collides across restarts and eventually
+      across gateway/domain-HPC instances) if absent. Stamped on every
+      response, success or error. Threaded into every emitted structured
+      event as `correlation_id`. Emission itself is now pluggable
+      (`Router::set_event_sink`, defaults to stdout) — added for testability
+      here, but it's also exactly the seam Phase 3's MQTT transport needs;
+      no rework expected when that lands.
 
-**Exit criteria:** a client that has never seen the vehicle before can
-enumerate entities, discover every readable value with its type and unit, and
-read them in one batched call.
+**Exit criteria — met:** `GET /v1/entities/vehicle/body/bcm/data?ids=vin,battery_voltage,door_lock_state`
+against the live demo server returns all three, typed and decoded, in one
+call — a client that has never seen the vehicle before can enumerate
+entities (`/v1/entities`), discover every readable value with its type and
+unit (`/docs`), and read them in one batched call.
 
 ### Target config schemas (Phase 1 catalog / Phase 4 topology)
 
@@ -418,11 +443,15 @@ Nobody ships SOVD with native IDS integration. Most differentiated part of the
 project. Diagnostic interfaces are privileged *by design*, so they belong under
 the same monitoring as the CAN bus.
 
-Events already emitted (currently stdout via `emit_event()` in `routes.cpp`):
-`lock_acquired`, `lock_denied`, `lock_release_mismatch`, `lock_released`,
-`mode_changed`, `data_written`, `operation_executed`, `faults_cleared`
+Events already emitted, each carrying `correlation_id` (Phase 1), via
+`Router::EventSink` in `routes.cpp` — defaults to stdout, swap with
+`set_event_sink()`: `lock_acquired`, `lock_denied`, `lock_release_mismatch`,
+`lock_released`, `mode_changed`, `data_written`, `operation_executed`,
+`faults_cleared`
 
-- [ ] MQTT transport for existing structured events
+- [ ] MQTT transport for existing structured events — swap the default
+      stdout `EventSink` for one that publishes; no `routes.cpp` call site
+      needs to change
 - [ ] Feed existing pipeline: MQTT → Telegraf → InfluxDB → Grafana OSS
 - [ ] Grafana panels: session timeline, lock contention, auth failure rate
 - [ ] **Alert signatures:** `lock_release_mismatch`, and repeated `lock_denied`

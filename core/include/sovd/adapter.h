@@ -11,6 +11,7 @@
 #ifndef SOVD_ADAPTER_H
 #define SOVD_ADAPTER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -48,6 +49,19 @@ typedef struct sovd_fault_t {
  * interpret the bytes behind this pointer. */
 typedef struct sovd_adapter_ctx sovd_adapter_ctx;
 
+/* Coarse backend capability flags. Declared statically per adapter type
+ * (a field on the vtable, not a runtime query) — same philosophy as the
+ * NULL-fn-ptr capability declaration below: "capability reduction by
+ * linkage, not runtime checks." These don't gate whether an operation
+ * works at all (that's still the NULL-fn-ptr checks); they describe how
+ * well, so the server can decide things like whether a batch read gets a
+ * native multi-DID call or a per-DID loop. */
+typedef struct sovd_capability_t {
+    bool supports_batch_read;      /* native multi-DID read, not just looped read_data */
+    bool supports_async_operations;
+    bool supports_io_control;      /* distinguishes 0x2F IOControl from 0x2E write */
+} sovd_capability_t;
+
 typedef struct sovd_vtable_t {
     /* config_json is adapter-specific connection/config data (Phase 4
      * topology loader will pass the entity's `adapter:` block here). May be
@@ -78,6 +92,8 @@ typedef struct sovd_vtable_t {
     void (*free_faults)(sovd_fault_t *faults, size_t count);
     void (*free_buffer)(sovd_buffer_t *buf);
     void (*free_string)(char *str);
+
+    sovd_capability_t capabilities;
 } sovd_vtable_t;
 
 /* Shared malloc-based deallocators, usable by any adapter that allocates its

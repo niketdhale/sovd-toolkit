@@ -41,6 +41,7 @@ sovd_adapter_ctx *mock_create(const char *config_json) {
     (void)config_json;
     auto *st = new MockState();
     st->faults.push_back(make_fault("P0A0F-16", "confirmed"));
+    st->faults.push_back(make_fault("P0420-14", "pending"));
     // Seeds match the worked example in CLAUDE.md's "path mapping" section:
     // DID 010A = 0x32C8 -> 13000 raw, decoded (Phase 1) as 13.0V.
     st->data["F190"] = {'S', 'O', 'V', 'D', 'T', 'O', 'O', 'L', 'K', 'I', 'T', 'M', 'O', 'C', 'K', '0', '1'};
@@ -129,6 +130,10 @@ const sovd_vtable_t g_mock_vtable = {
     sovd_default_free_faults,
     sovd_default_free_buffer,
     sovd_default_free_string,
+    // capabilities: fully synchronous, no native batch read, no distinct
+    // IOControl path — honest about what the mock actually does, not what
+    // a real ECU backend eventually will.
+    {false, false, false},
 };
 
 } // namespace

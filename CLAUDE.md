@@ -123,7 +123,7 @@ sovd-toolkit/
 │   └── src/{main.cpp, routes.cpp}
 ├── tests/
 │   ├── test_framework.hpp  # minimal harness, no external dep
-│   └── test_core.cpp       # 158 assertions
+│   └── test_core.cpp       # 195 assertions
 └── third_party/            # vendored single headers
     ├── httplib.h           # cpp-httplib v0.18.3 (MIT)
     └── json.hpp            # nlohmann/json v3.11.3 (MIT)
@@ -148,7 +148,7 @@ encode/decode).
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
-./build/test_core                      # 158 assertions
+./build/test_core                      # 195 assertions
 ./build/sovd_server 20002 domain       # port, role
 cd build && ctest --output-on-failure
 ```
@@ -165,7 +165,7 @@ way.
 
 ## Phase 0 — COMPLETE ✅
 
-Verified: clean warning-free build, 158 assertions passing (`test_core`),
+Verified: clean warning-free build, 195 assertions passing (`test_core`),
 end-to-end HTTP run hitting every expected status code (curl against a live
 `sovd_server`).
 
@@ -187,15 +187,20 @@ end-to-end HTTP run hitting every expected status code (curl against a live
 | GET | `/entities` | flat listing with `has_backend` |
 | GET | `/entities/{path}/faults` | |
 | DELETE | `/entities/{path}/faults` | lock-gated |
-| GET | `/entities/{path}/data/{did}` | hex DID e.g. `F190` |
-| PUT | `/entities/{path}/data/{did}` | lock-gated |
+| GET | `/entities/{path}/data/{id}` | catalog `id` (e.g. `battery_voltage`) if attached, else raw hex DID |
+| PUT | `/entities/{path}/data/{id}` | lock-gated; same `id`-or-DID resolution; wire value is still hex bytes even for a named `id` (catalog `encode()` not built yet) |
 | POST | `/entities/{path}/modes` | lock-gated, UDS session control |
 | POST | `/entities/{path}/operations/{op}` | lock-gated, UDS RoutineControl |
 | POST | `/entities/{path}/locks` | returns `lock_id` |
 | DELETE | `/entities/{path}/locks/{lock_id}` | |
+| GET | `/entities/{path}/docs` | capability description from the attached catalog (empty `data`/`operations` if none attached); works on any entity, not just ones with a backend |
 
 `{path}` is a full multi-segment entity path (`vehicle/body/bcm`).
 Lock-gated ops require `X-SOVD-Lock-Id` header when a lock is held.
+A named `/data/{id}` GET returns a catalog-decoded typed `value` (string,
+scaled number, or enum label) plus `unit` when applicable; the raw-DID
+fallback returns hex, same as Phase 0. PUT to a catalog `id` with
+`access: read` is rejected with 400 before it reaches the adapter.
 
 ### Error mapping (implemented)
 `NOT_FOUND`→404 · `LOCKED`→423 · `BAD_REQUEST`→400 · `UNSUPPORTED`→501 ·
@@ -235,15 +240,21 @@ DIDs, then have to rewrite it.
       `scale`, `unit`, enum `values`, `access`, `io_control`,
       `requires_session`). `catalog/` module, backed by yaml-cpp. Includes
       catalog-driven `decode()` (bytes → typed value: string/float-scaled/
-      enum-label) — not yet wired into `server/routes.cpp`, which is the
-      remaining `/docs` + named-data-path work below. Encode (value → bytes,
-      needed for PUT) is deliberately not built yet — no caller needs it
-      until routes/adapters are wired to the catalog.
-- [ ] **`GET /entities/{path}/docs`** — capability description, serialized from
-      the catalog. *This is the answer to "how does the client know what to
-      call" and the highest-value remaining feature.*
-- [ ] **Named data paths** — `/data/battery_voltage` primary, raw hex DID as
-      fallback
+      enum-label).
+- [x] **`GET /entities/{path}/docs`** — capability description, serialized from
+      the catalog. Works on any entity (not just ones with a backend or a
+      catalog) — it's self-description, not a live diagnostic call, so it
+      returns 200 with empty `data`/`operations` rather than 501. Deviates
+      from the original phrasing above (which implied 501-on-no-backend like
+      every other endpoint); this was a deliberate call, not an oversight.
+- [x] **Named data paths** — `/data/battery_voltage` primary, raw hex DID as
+      fallback. `Router` owns a `path -> Catalog` map (`attach_catalog()`),
+      kept separate from `EntityRegistry`/topology per the settled "DID
+      catalog separate from topology" decision. `catalogs/bcm.yaml` is
+      attached to `vehicle/body/bcm` in `main.cpp`; other demo entities have
+      no catalog and just fall back to raw hex, same as Phase 0. PUT still
+      takes hex bytes over the wire regardless of `id` vs DID — catalog
+      `encode()` (typed value → bytes) remains unbuilt; nothing needs it yet.
 - [ ] **Batch data read** — `GET /data?ids=a,b,c`. Without it, reading 30 live
       values is 30 HTTP round trips (unusable for real diagnostics)
 - [ ] **Fault filtering** — `?status=confirmed|pending|testFailed`

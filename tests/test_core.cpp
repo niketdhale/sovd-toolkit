@@ -435,6 +435,9 @@ struct TestServer {
         registry.add_entity("vehicle/body/bcm", EntityType::Component, mock, mock->create(nullptr));
 
         router.register_routes(svr);
+        // kSampleCatalogYaml's DIDs (F190/010A/0200) match the mock adapter's
+        // seeded data, so named paths resolve to real values in these tests.
+        router.attach_catalog("vehicle/body/bcm", Catalog::load_from_string(kSampleCatalogYaml));
 
         port = svr.bind_to_any_port("127.0.0.1");
         thread = std::thread([this] { svr.listen_after_bind(); });
@@ -567,6 +570,113 @@ void test_http_mode_and_operation() {
     ASSERT_EQ(json::parse(op->body)["status"].get<std::string>(), "completed");
 }
 
+void test_http_docs_lists_catalog_data_and_operations() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto res = cli.Get("/entities/vehicle/body/bcm/docs");
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(res->status, 200);
+    json body = json::parse(res->body);
+
+    ASSERT_TRUE(body["has_backend"].get<bool>());
+    ASSERT_EQ(body["data"].size(), static_cast<size_t>(3));
+    ASSERT_EQ(body["operations"].size(), static_cast<size_t>(1));
+
+    bool found_voltage = false;
+    for (auto &d : body["data"]) {
+        if (d["id"].get<std::string>() == "battery_voltage") {
+            ASSERT_EQ(d["did"].get<std::string>(), "010A");
+            ASSERT_EQ(d["type"].get<std::string>(), "float");
+            ASSERT_EQ(d["unit"].get<std::string>(), "V");
+            found_voltage = true;
+        }
+    }
+    ASSERT_TRUE(found_voltage);
+    ASSERT_EQ(body["operations"][0]["id"].get<std::string>(), "self_test");
+}
+
+void test_http_docs_empty_for_uncataloged_entity() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    // vehicle/body is a grouping node with no catalog attached; /docs still
+    // succeeds (it's self-description, not a live diagnostic op), just with
+    // empty data/operations.
+    auto res = cli.Get("/entities/vehicle/body/docs");
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(res->status, 200);
+    json body = json::parse(res->body);
+    ASSERT_FALSE(body["has_backend"].get<bool>());
+    ASSERT_EQ(body["data"].size(), static_cast<size_t>(0));
+    ASSERT_EQ(body["operations"].size(), static_cast<size_t>(0));
+}
+
+void test_http_named_data_path_decodes_typed_value() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto voltage = cli.Get("/entities/vehicle/body/bcm/data/battery_voltage");
+    ASSERT_TRUE(voltage != nullptr);
+    ASSERT_EQ(voltage->status, 200);
+    json v_body = json::parse(voltage->body);
+    ASSERT_EQ(v_body["id"].get<std::string>(), "battery_voltage");
+    ASSERT_EQ(v_body["did"].get<std::string>(), "010A");
+    ASSERT_TRUE(std::abs(v_body["value"].get<double>() - 13.0) < 1e-9);
+    ASSERT_EQ(v_body["unit"].get<std::string>(), "V");
+
+    auto lock_state = cli.Get("/entities/vehicle/body/bcm/data/door_lock_state");
+    ASSERT_TRUE(lock_state != nullptr);
+    ASSERT_EQ(lock_state->status, 200);
+    ASSERT_EQ(json::parse(lock_state->body)["value"].get<std::string>(), "locked");
+
+    auto vin = cli.Get("/entities/vehicle/body/bcm/data/vin");
+    ASSERT_TRUE(vin != nullptr);
+    ASSERT_EQ(vin->status, 200);
+    ASSERT_EQ(json::parse(vin->body)["value"].get<std::string>(), "SOVDTOOLKITMOCK01");
+}
+
+void test_http_data_path_falls_back_to_raw_hex_did() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    // "010A" isn't a catalog id, so it's treated as a raw DID (Phase 0
+    // behavior) instead of a 404.
+    auto res = cli.Get("/entities/vehicle/body/bcm/data/010A");
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(res->status, 200);
+    json body = json::parse(res->body);
+    ASSERT_EQ(body["id"].get<std::string>(), "010A");
+    ASSERT_EQ(body["value"].get<std::string>(), "32C8");
+    ASSERT_FALSE(body.contains("unit"));
+}
+
+void test_http_named_data_path_put_readonly_guard_and_write() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto lock_res = cli.Post("/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    std::string lock_id = json::parse(lock_res->body)["lock_id"].get<std::string>();
+    httplib::Headers headers = {{"X-SOVD-Lock-Id", lock_id}};
+
+    // vin is access: read in the catalog -> write is rejected before it
+    // ever reaches the adapter.
+    auto readonly = cli.Put("/entities/vehicle/body/bcm/data/vin", headers, R"({"value":"00"})", "application/json");
+    ASSERT_TRUE(readonly != nullptr);
+    ASSERT_EQ(readonly->status, 400);
+
+    // door_lock_state is read_write -> named write succeeds, and a
+    // subsequent named read observes it (raw hex wire format, per the
+    // catalog's still-hex-only PUT contract).
+    auto write = cli.Put("/entities/vehicle/body/bcm/data/door_lock_state", headers, R"({"value":"02"})",
+                          "application/json");
+    ASSERT_TRUE(write != nullptr);
+    ASSERT_EQ(write->status, 204);
+
+    auto after = cli.Get("/entities/vehicle/body/bcm/data/door_lock_state");
+    ASSERT_EQ(json::parse(after->body)["value"].get<std::string>(), "deadlocked");
+}
+
 // ---------------------------------------------------------------------
 
 int main() {
@@ -609,6 +719,12 @@ int main() {
     RUN_TEST(test_http_write_data_locked_without_header_423);
     RUN_TEST(test_http_lock_conflict_and_release);
     RUN_TEST(test_http_mode_and_operation);
+
+    RUN_TEST(test_http_docs_lists_catalog_data_and_operations);
+    RUN_TEST(test_http_docs_empty_for_uncataloged_entity);
+    RUN_TEST(test_http_named_data_path_decodes_typed_value);
+    RUN_TEST(test_http_data_path_falls_back_to_raw_hex_did);
+    RUN_TEST(test_http_named_data_path_put_readonly_guard_and_write);
 
     return testfw::summary();
 }

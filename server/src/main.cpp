@@ -3,6 +3,7 @@
 
 #include "httplib.h"
 #include "mock_adapter.h"
+#include "sovd/catalog/did_catalog.hpp"
 #include "sovd/entity_registry.hpp"
 #include "sovd/lock_manager.hpp"
 #include "sovd/server/routes.hpp"
@@ -41,6 +42,15 @@ int main(int argc, char **argv) {
     httplib::Server svr;
     sovd::server::Router router(registry, locks, "sovd-demo", role);
     router.register_routes(svr);
+
+    // Catalog is per-ECU-software-version data, loaded independently of
+    // topology (see CLAUDE.md). Hardcoded to bcm for this demo topology;
+    // Phase 4's config loader will read `did_catalog:` per entity instead.
+    try {
+        router.attach_catalog("vehicle/body/bcm", catalog::Catalog::load_from_file("catalogs/bcm.yaml"));
+    } catch (const catalog::CatalogError &ex) {
+        std::cerr << "warning: failed to load catalogs/bcm.yaml: " << ex.what() << std::endl;
+    }
 
     std::cout << "sovd_server listening on :" << port << " role=" << role << std::endl;
     if (!svr.listen("0.0.0.0", port)) {

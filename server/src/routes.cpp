@@ -2,8 +2,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cctype>
 #include <iostream>
+#include <variant>
 #include <vector>
 
 #include "httplib.h"
@@ -52,6 +54,12 @@ std::string to_hex(const uint8_t *data, size_t len) {
         out.push_back(digits[data[i] & 0x0F]);
     }
     return out;
+}
+
+std::string to_hex_u16(uint16_t v) {
+    char buf[5];
+    std::snprintf(buf, sizeof(buf), "%04X", v);
+    return std::string(buf);
 }
 
 bool from_hex(std::string s, std::vector<uint8_t> &out) {
@@ -110,6 +118,20 @@ void Router::register_routes(httplib::Server &svr) {
     svr.Delete(R"(/entities/(.+)/locks/([^/]+))", [this](const httplib::Request &req, httplib::Response &res) {
         handle_delete_lock(req, res, req.matches[1], req.matches[2]);
     });
+
+    svr.Get(R"(/entities/(.+)/docs)", [this](const httplib::Request &req, httplib::Response &res) {
+        handle_get_docs(req, res, req.matches[1]);
+    });
+}
+
+void Router::attach_catalog(const std::string &entity_path, catalog::Catalog cat) {
+    catalogs_.insert_or_assign(entity_path, std::move(cat));
+}
+
+const catalog::Catalog *Router::find_catalog(const std::string &entity_path) const {
+    auto it = catalogs_.find(entity_path);
+    if (it == catalogs_.end()) return nullptr;
+    return &it->second;
 }
 
 const Entity *Router::require_entity(httplib::Response &res, const std::string &path) {
@@ -196,7 +218,7 @@ void Router::handle_clear_faults(const httplib::Request &req, httplib::Response 
 }
 
 void Router::handle_get_data(const httplib::Request &, httplib::Response &res, const std::string &path,
-                              const std::string &did) {
+                              const std::string &id_or_did) {
     const Entity *e = require_entity(res, path);
     if (!e) return;
     if (!e->vtable || !e->vtable->read_data) {
@@ -204,21 +226,47 @@ void Router::handle_get_data(const httplib::Request &, httplib::Response &res, c
         return;
     }
 
+    // Named data paths: try the catalog's `id` first (e.g. battery_voltage),
+    // fall back to treating the segment as a raw hex DID.
+    const catalog::Catalog *cat = find_catalog(path);
+    const catalog::DataItem *item = cat ? cat->find_by_id(id_or_did) : nullptr;
+    std::string did_hex = item ? to_hex_u16(item->did) : id_or_did;
+
     sovd_buffer_t buf{};
-    sovd_result_t r = e->vtable->read_data(e->adapter_ctx, path.c_str(), did.c_str(), &buf);
+    sovd_result_t r = e->vtable->read_data(e->adapter_ctx, path.c_str(), did_hex.c_str(), &buf);
     if (r != SOVD_OK) {
         write_error(res, http_status_for(r), "ADAPTER_ERROR", "read_data failed");
         return;
     }
-
-    json body = {{"id", did}, {"value", to_hex(buf.data, buf.len)}};
+    std::vector<uint8_t> bytes(buf.data, buf.data + buf.len);
     if (e->vtable->free_buffer) e->vtable->free_buffer(&buf);
+
+    json body;
+    if (item) {
+        body["id"] = item->id;
+        body["did"] = did_hex;
+        try {
+            auto decoded = catalog::Catalog::decode(*item, bytes);
+            if (std::holds_alternative<std::string>(decoded)) {
+                body["value"] = std::get<std::string>(decoded);
+            } else {
+                body["value"] = std::get<double>(decoded);
+            }
+        } catch (const catalog::CatalogError &ex) {
+            write_error(res, 502, "ADAPTER_ERROR", std::string("catalog decode failed: ") + ex.what());
+            return;
+        }
+        if (!item->encoding.unit.empty()) body["unit"] = item->encoding.unit;
+    } else {
+        body["id"] = id_or_did;
+        body["value"] = to_hex(bytes.data(), bytes.size());
+    }
 
     res.set_content(body.dump(), "application/json");
 }
 
 void Router::handle_put_data(const httplib::Request &req, httplib::Response &res, const std::string &path,
-                              const std::string &did) {
+                              const std::string &id_or_did) {
     const Entity *e = require_entity(res, path);
     if (!e) return;
     if (!e->vtable || !e->vtable->write_data) {
@@ -227,6 +275,18 @@ void Router::handle_put_data(const httplib::Request &req, httplib::Response &res
     }
     if (!check_lock_header(req, res, path)) return;
 
+    const catalog::Catalog *cat = find_catalog(path);
+    const catalog::DataItem *item = cat ? cat->find_by_id(id_or_did) : nullptr;
+    std::string did_hex = item ? to_hex_u16(item->did) : id_or_did;
+
+    if (item && item->access == catalog::Access::Read) {
+        write_error(res, 400, "BAD_REQUEST", "data item '" + item->id + "' is read-only");
+        return;
+    }
+
+    // The catalog resolves named ids -> DIDs above; it doesn't yet encode
+    // typed values -> bytes (no caller needed that before this), so the
+    // wire format stays hex bytes regardless of whether the path was named.
     json parsed;
     try {
         parsed = json::parse(req.body);
@@ -245,13 +305,14 @@ void Router::handle_put_data(const httplib::Request &req, httplib::Response &res
         return;
     }
 
-    sovd_result_t r = e->vtable->write_data(e->adapter_ctx, path.c_str(), did.c_str(), bytes.data(), bytes.size());
+    sovd_result_t r =
+        e->vtable->write_data(e->adapter_ctx, path.c_str(), did_hex.c_str(), bytes.data(), bytes.size());
     if (r != SOVD_OK) {
         write_error(res, http_status_for(r), "ADAPTER_ERROR", "write_data failed");
         return;
     }
 
-    emit_event("data_written", {{"entity", path}, {"id", did}});
+    emit_event("data_written", {{"entity", path}, {"id", item ? item->id : id_or_did}, {"did", did_hex}});
     res.status = 204;
 }
 
@@ -372,6 +433,67 @@ void Router::handle_delete_lock(const httplib::Request &, httplib::Response &res
             write_error(res, 404, "NOT_FOUND", "no active lock on entity");
             break;
     }
+}
+
+void Router::handle_get_docs(const httplib::Request &, httplib::Response &res, const std::string &path) {
+    const Entity *e = require_entity(res, path);
+    if (!e) return;
+
+    json body = {
+        {"path", path},
+        {"type", entity_type_to_string(e->type)},
+        {"has_backend", e->has_backend()},
+        {"data", json::array()},
+        {"operations", json::array()},
+    };
+
+    const catalog::Catalog *cat = find_catalog(path);
+    if (!cat) {
+        res.set_content(body.dump(), "application/json");
+        return;
+    }
+
+    for (auto &item : cat->data()) {
+        json d = {
+            {"id", item.id},
+            {"did", to_hex_u16(item.did)},
+            {"type", catalog::data_type_to_string(item.type)},
+            {"access", catalog::access_to_string(item.access)},
+        };
+        if (item.io_control) d["io_control"] = true;
+        if (item.requires_session) d["requires_session"] = *item.requires_session;
+
+        switch (item.type) {
+            case catalog::DataType::String:
+                if (item.length > 0) d["length"] = item.length;
+                break;
+            case catalog::DataType::Float:
+                d["unit"] = item.encoding.unit;
+                d["scale"] = item.encoding.scale;
+                break;
+            case catalog::DataType::Enum: {
+                json values = json::object();
+                for (auto &ev : item.values) values[std::to_string(ev.raw)] = ev.label;
+                d["values"] = values;
+                break;
+            }
+            case catalog::DataType::Raw:
+                break;
+        }
+        body["data"].push_back(d);
+    }
+
+    for (auto &op : cat->operations()) {
+        json o = {
+            {"id", op.id},
+            {"routine_id", to_hex_u16(op.routine_id)},
+            {"async", op.async},
+        };
+        if (op.requires_session) o["requires_session"] = *op.requires_session;
+        body["operations"].push_back(o);
+    }
+
+    res.set_content(body.dump(), "application/json");
 }
 
 } // namespace sovd::server

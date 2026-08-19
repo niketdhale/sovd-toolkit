@@ -10,7 +10,7 @@ See `CLAUDE.md` for the full architecture, phase plan, and design rationale.
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
-./build/test_core                      # 158 assertions
+./build/test_core                      # 195 assertions
 ./build/sovd_server 20002 domain       # port, role
 cd build && ctest --output-on-failure
 ```

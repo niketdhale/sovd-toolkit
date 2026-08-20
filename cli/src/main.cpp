@@ -4,12 +4,10 @@
 // That's what "discovery-driven, not hardcoded" (CLAUDE.md) means for a CLI
 // specifically: the same constraint Phase 7's web UI restates for a GUI.
 #include <atomic>
-#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
-#include <thread>
 #include <vector>
 
 #include "sovd/client/lock_guard.hpp"
@@ -195,19 +193,24 @@ int main(int argc, char **argv) {
             // or redirected `watch`, the exact case "live" output is for,
             // would otherwise show nothing until the process exits.
             std::cout << "watching " << argv[3] << "/" << argv[4] << " every " << interval_ms
-                      << "ms (Ctrl-C to stop)\n";
+                      << "ms via SSE (Ctrl-C to stop)\n";
             std::cout.flush();
+            // Phase 6: pushed by the server's shared poller, not polled by
+            // this loop -- "backed by adapter-level periodic read, not
+            // per-request polling" (CLAUDE.md) applies to the client side
+            // too: this is one long-lived subscription, not a GET per tick.
             std::string last;
-            while (!g_stop.load()) {
-                DataValue v = cli.get_data(argv[3], argv[4]);
-                std::string rendered = v.error ? *v.error : v.value.dump();
-                if (rendered != last) {
-                    print_data_value(v);
-                    std::cout.flush();
-                    last = rendered;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
-            }
+            cli.subscribe_data(argv[3], argv[4], interval_ms,
+                                [&](const nlohmann::json &event) {
+                                    DataValue v = parse_data_value(event);
+                                    std::string rendered = v.error ? *v.error : v.value.dump();
+                                    if (rendered != last) {
+                                        print_data_value(v);
+                                        std::cout.flush();
+                                        last = rendered;
+                                    }
+                                },
+                                &g_stop);
             return 0;
         }
 

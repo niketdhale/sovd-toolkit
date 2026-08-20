@@ -9,6 +9,7 @@
 #include "sovd/catalog/did_catalog.hpp"
 #include "sovd/entity_registry.hpp"
 #include "sovd/lock_manager.hpp"
+#include "sovd/server/stream_hub.hpp"
 
 namespace httplib {
 class Server;
@@ -93,6 +94,12 @@ private:
     void handle_delete_lock(const httplib::Request &req, httplib::Response &res, const std::string &path,
                              const std::string &lock_id);
     void handle_get_docs(const httplib::Request &req, httplib::Response &res, const std::string &path);
+    // Phase 6: SSE. Shares read_one_data_item's decode logic (routes.cpp's
+    // anonymous namespace) with the plain GET, so a client switching from
+    // polling to streaming sees byte-identical JSON per event -- only the
+    // transport changes.
+    void handle_stream_data(const httplib::Request &req, httplib::Response &res, const std::string &path,
+                             const std::string &id_or_did);
 
     const Entity *require_entity(httplib::Response &res, const std::string &path);
     bool check_lock_header(const httplib::Request &req, httplib::Response &res, const std::string &path);
@@ -125,6 +132,7 @@ private:
     std::unordered_map<std::string, ProxyTarget> proxies_;
     EventSink event_sink_;
     EventSink telemetry_sink_;
+    StreamHub stream_hub_;
 };
 
 } // namespace sovd::server

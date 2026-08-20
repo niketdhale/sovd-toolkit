@@ -1,5 +1,6 @@
 #include "sovd/server/routes.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -217,6 +218,12 @@ void Router::register_routes(httplib::Server &svr) {
     // since one requires a further "/<id>" segment and the other forbids it.
     svr.Get(R"(/v1/entities/(.+)/data)", [this](const httplib::Request &req, httplib::Response &res) {
         handle_get_data_batch(req, res, req.matches[1]);
+    });
+    // Phase 6: registered *before* the plain .../data/(.+) pattern below --
+    // otherwise that route's greedy (.+) id-capture would swallow the
+    // trailing "/stream" as part of the id instead of this one matching.
+    svr.Get(R"(/v1/entities/(.+)/data/(.+)/stream)", [this](const httplib::Request &req, httplib::Response &res) {
+        handle_stream_data(req, res, req.matches[1], req.matches[2]);
     });
     svr.Get(R"(/v1/entities/(.+)/data/(.+))", [this](const httplib::Request &req, httplib::Response &res) {
         handle_get_data(req, res, req.matches[1], req.matches[2]);
@@ -436,6 +443,60 @@ void Router::handle_get_data(const httplib::Request &req, httplib::Response &res
         return;
     }
     res.set_content(outcome.body.dump(), "application/json");
+}
+
+void Router::handle_stream_data(const httplib::Request &req, httplib::Response &res, const std::string &path,
+                                 const std::string &id_or_did) {
+    correlation_id_for(req, res);
+    const Entity *e = require_entity(res, path);
+    if (!e) return;
+    if (find_proxy(path)) {
+        // try_forward()'s one-shot request/response round trip can't carry
+        // a held-open SSE stream through -- that's a real second feature
+        // (bidirectional stream proxying), not attempted here. Failing
+        // clearly beats silently mis-forwarding a truncated response.
+        write_error(res, 501, "UNSUPPORTED", "streaming through a Phase 4 proxy is not supported");
+        return;
+    }
+    if (!e->vtable || !e->vtable->read_data) {
+        write_error(res, 501, "UNSUPPORTED", "entity has no diagnostic backend");
+        return;
+    }
+
+    int interval_ms = 1000;
+    if (req.has_param("interval_ms")) {
+        interval_ms = std::max(100, std::atoi(req.get_param_value("interval_ms").c_str()));
+    }
+
+    const catalog::Catalog *cat = find_catalog(path);
+    auto read_fn = [e, path, id_or_did, cat]() -> std::string {
+        auto outcome = read_one_data_item(*e, path, id_or_did, cat);
+        json body = outcome.ok ? outcome.body
+                                : json{{"id", id_or_did}, {"error", outcome.error_code}, {"message", outcome.message}};
+        return body.dump();
+    };
+
+    // shared_ptr, not the Subscription itself: std::function (which
+    // set_chunked_content_provider's callback is) requires its target to
+    // be copy-constructible, and Subscription is deliberately move-only
+    // (RAII unsubscribe must happen exactly once).
+    auto sub = std::make_shared<StreamHub::Subscription>(stream_hub_.subscribe(path, id_or_did, interval_ms, read_fn));
+
+    res.set_header("Cache-Control", "no-cache");
+    res.set_chunked_content_provider("text/event-stream", [sub](size_t /*offset*/, httplib::DataSink &sink) {
+        std::string json_line;
+        // wait_next's own timeout (well under any sane read-timeout on the
+        // client side) is what turns an idle stream into periodic
+        // ": keep-alive" comments instead of a connection that looks dead.
+        if (sub->wait_next(json_line, 15000)) {
+            std::string frame = "data: " + json_line + "\n\n";
+            if (!sink.is_writable() || !sink.write(frame.data(), frame.size())) return false;
+        } else {
+            static const char ka[] = ": keep-alive\n\n";
+            if (!sink.is_writable() || !sink.write(ka, sizeof(ka) - 1)) return false;
+        }
+        return sink.is_writable();
+    });
 }
 
 void Router::handle_get_data_batch(const httplib::Request &req, httplib::Response &res, const std::string &path) {

@@ -158,8 +158,8 @@ sovd-toolkit/
 │   ├── domain_body.yaml         # domain tier, port 20003, mock-backed
 │   └── gateway.yaml             # gateway tier, port 20002, sovd_proxy-backed
 ├── server/                 # C++ HTTP layer — NO diagnostic logic
-│   ├── include/sovd/server/{routes.hpp, config_loader.hpp, mqtt_publisher.hpp, mdns_advertise.hpp}
-│   └── src/{main.cpp, routes.cpp, config_loader.cpp, mqtt_publisher.cpp, mdns_advertise.cpp}
+│   ├── include/sovd/server/{routes.hpp, config_loader.hpp, mqtt_publisher.hpp, mdns_advertise.hpp, stream_hub.hpp}
+│   └── src/{main.cpp, routes.cpp, config_loader.cpp, mqtt_publisher.cpp, mdns_advertise.cpp, stream_hub.cpp}
 ├── client/                  # Phase 5: SDK — typed wrappers, RAII locks, mDNS discovery
 │   ├── include/sovd/client/{sovd_client.hpp, lock_guard.hpp, mdns_discovery.hpp}
 │   └── src/{sovd_client.cpp, lock_guard.cpp, mdns_discovery.cpp}
@@ -171,8 +171,8 @@ sovd-toolkit/
 │   └── telegraf/sovd_mqtt_input.conf.example
 ├── tests/
 │   ├── test_framework.hpp     # minimal harness, no external dep
-│   ├── test_core.cpp          # 318 assertions (mock path, default build)
-│   ├── test_client.cpp        # 27 assertions — SovdClient/LockGuard vs. a real live server
+│   ├── test_core.cpp          # 342 assertions (mock path, default build)
+│   ├── test_client.cpp        # 32 assertions — SovdClient/LockGuard/subscribe_data vs. a real live server
 │   ├── fake_doip_server.hpp   # in-repo fault-injecting DoIP/UDS test fixture
 │   └── test_uds_doip.cpp      # 180 assertions, built only when SOVD_ADAPTER_UDS_DOIP=ON
 └── third_party/            # vendored single headers
@@ -207,8 +207,8 @@ runtime instance; see Phase 2 below).
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
-./build/test_core                      # 318 assertions
-./build/test_client                    # 27 assertions (Phase 5 SDK, always built)
+./build/test_core                      # 342 assertions
+./build/test_client                    # 32 assertions (Phase 5 SDK, always built)
 ./build/sovd_server 20002 domain       # port, role — hardcoded zero-config demo
 cd build && ctest --output-on-failure
 ```
@@ -218,8 +218,14 @@ Phase 5 CLI, same server:
 ./build/sovd_cli http://127.0.0.1:20002 entities
 ./build/sovd_cli http://127.0.0.1:20002 docs vehicle/body/bcm
 ./build/sovd_cli http://127.0.0.1:20002 read vehicle/body/bcm battery_voltage
-./build/sovd_cli http://127.0.0.1:20002 watch vehicle/body/bcm battery_voltage 1000
+./build/sovd_cli http://127.0.0.1:20002 watch vehicle/body/bcm battery_voltage 1000   # Phase 6: SSE-backed, not polling
 ./build/sovd_cli discover                          # mDNS; needs SOVD_CLIENT_MDNS + a running avahi-daemon
+```
+
+Phase 6 raw SSE, same server (`interval_ms` is the server's poll cadence,
+shared by every subscriber at that value — see StreamHub):
+```bash
+curl -N "http://127.0.0.1:20002/v1/entities/vehicle/body/bcm/data/battery_voltage/stream?interval_ms=1000"
 ```
 
 Phase 4: `./sovd_server <path-to-existing-file>` loads a YAML topology
@@ -283,9 +289,11 @@ end-to-end HTTP run hitting every expected status code (curl against a live
 | GET | `/v1/entities/{path}/data?ids=a,b,c` | batch read; per-item failure doesn't fail the batch |
 | GET | `/v1/entities/{path}/data/{id}` | catalog `id` (e.g. `battery_voltage`) if attached, else raw hex DID |
 | PUT | `/v1/entities/{path}/data/{id}` | lock-gated; same `id`-or-DID resolution; wire value is still hex bytes even for a named `id` (catalog `encode()` not built yet) |
+| GET | `/v1/entities/{path}/data/{id}/stream?interval_ms=N` | Phase 6: SSE, shared poller per `(path,id,interval_ms)`; `501` if the entity is proxied (Phase 4) — streaming through a proxy isn't supported |
 | POST | `/v1/entities/{path}/modes` | lock-gated, UDS session control |
 | POST | `/v1/entities/{path}/operations/{op}` | lock-gated, UDS RoutineControl |
 | POST | `/v1/entities/{path}/locks` | returns `lock_id` |
+| PUT | `/v1/entities/{path}/locks/{lock_id}` | Phase 5: renews TTL without changing `lock_id` — what the client SDK's RAII lock heartbeat calls |
 | DELETE | `/v1/entities/{path}/locks/{lock_id}` | |
 | GET | `/v1/entities/{path}/docs` | capability description from the attached catalog (empty `data`/`operations` if none attached); works on any entity, not just ones with a backend |
 
@@ -871,13 +879,71 @@ live testing, not by inspection — see the RAII and CLI bullets.
 
 ---
 
-## Phase 6 — Streaming
+## Phase 6 — Streaming — COMPLETE ✅
 
 Clearest "why SOVD over UDS" demonstration.
 
-- [ ] SSE subscription endpoint for live data
-- [ ] Client-side subscription handling
-- [ ] Backed by adapter-level periodic read, not per-request polling
+Verified: clean warning-free build in three configs (default, `+uds_doip`,
+`+uds_doip -mdns`), 374 assertions total (up from 345 — `test_core` 342,
+`test_client` 32). Live-verified with curl and `sovd-cli`: raw SSE frames,
+`watch` showing an initial value then a pushed update after a background
+write (with output correctly flushed under `timeout`/SIGTERM, matching
+Phase 5's fix), a clean 501 (not a silent mis-forward) streaming through a
+Phase 4 gateway, and two concurrent curl subscribers to the same data point
+landing the same frame count on the same cadence. **Two real threading bugs
+found and fixed by actually running the tests, not by review** — see the
+first two bullets.
+
+- [x] **SSE subscription endpoint for live data** —
+      `GET /v1/entities/{path}/data/{id}/stream?interval_ms=N`
+      (`Router::handle_stream_data`, registered *before* the plain
+      `.../data/(.+)` pattern so that route's greedy capture doesn't
+      swallow the trailing `/stream`). Reuses `read_one_data_item` — the
+      exact same decode path the plain GET uses — so a client switching
+      from polling to streaming sees byte-identical JSON per event, only
+      the transport changes. Streaming through a Phase 4 `sovd_proxy` is a
+      real second feature (bidirectional stream proxying) not attempted
+      here; explicitly guarded to a clean `501` rather than letting
+      `try_forward()`'s one-shot semantics silently truncate a stream.
+      **Live bug found and fixed**: the shared poller's interval used
+      `std::this_thread::sleep_for()`, which can't be woken by a
+      `stop`+`notify_all()` — so unsubscribing from a long-interval stream
+      blocked the thread destroying the last `Subscription` (potentially an
+      HTTP worker thread) for up to the full interval. Caught by a test
+      that legitimately hung for the length of a 60-second poll interval,
+      not by inspection. Fixed to an interruptible `condition_variable::
+      wait_for` with a `stop` predicate, mirroring the identical fix
+      already applied to `LockGuard`'s heartbeat in Phase 5 — this project's
+      second instance of "a background timer must be interruptible, not a
+      blind sleep," now clearly a pattern rather than a one-off.
+- [x] **Backed by adapter-level periodic read, not per-request polling** —
+      `server/src/stream_hub.cpp`'s `StreamHub`: one poller thread per
+      `(path, id, interval_ms)` key, shared by every subscriber at that
+      cadence (refcounted; last unsubscribe stops it), fanning out via a
+      version-numbered condition variable rather than each SSE connection
+      independently hitting the adapter on its own timer. Proven, not just
+      built: a unit test subscribes twice with a shared read-call counter
+      and asserts the count matches *one* poller's expected ticks, not two
+      — the precise way to catch a regression back to per-subscriber
+      polling that a live demo alone wouldn't reliably reveal. Different
+      `interval_ms` values for the same `(path, id)` deliberately get
+      independent pollers rather than one subscriber's cadence silently
+      overriding another's.
+- [x] **Client-side subscription handling** —
+      `SovdClient::subscribe_data()` (`client/src/sovd_client.cpp`):
+      blocking, runs the SSE receive loop on the caller's own thread via
+      `httplib::Client`'s `ContentReceiver`, invoking a callback per event
+      until the server ends the stream or a caller-supplied
+      `std::atomic<bool>* stop_flag` is set — deliberately not
+      thread-managed by the SDK itself, since every consumer so far already
+      has a natural thread for this. The CLI's `watch` command was switched
+      from polling to this (`interval_ms` now genuinely means "how often
+      the *server* reads the adapter," matching this phase's title, not
+      "how often the client asks"). **Live bug found and fixed**: `watch`
+      produced zero output when piped/redirected — already fixed in Phase 5
+      for the polling version (`std::cout.flush()`, SIGTERM handling); the
+      SSE rewrite inherited the fix since it reuses the same print path,
+      confirmed live rather than assumed.
 
 ---
 

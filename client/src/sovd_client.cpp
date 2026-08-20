@@ -9,17 +9,6 @@ using json = nlohmann::json;
 
 namespace {
 
-DataValue parse_data_value(const json &d) {
-    DataValue v;
-    v.id = d.value("id", "");
-    if (d.contains("did")) v.did = d["did"].get<std::string>();
-    if (d.contains("value")) v.value = d["value"];
-    if (d.contains("unit")) v.unit = d["unit"].get<std::string>();
-    if (d.contains("error")) v.error = d["error"].get<std::string>();
-    if (d.contains("message")) v.error_message = d["message"].get<std::string>();
-    return v;
-}
-
 std::string join_ids(const std::vector<std::string> &ids) {
     std::string out;
     for (size_t i = 0; i < ids.size(); ++i) {
@@ -31,7 +20,19 @@ std::string join_ids(const std::vector<std::string> &ids) {
 
 } // namespace
 
-SovdClient::SovdClient(std::string base_url, RetryPolicy retry) : cli_(base_url), retry_(retry) {
+DataValue parse_data_value(const json &d) {
+    DataValue v;
+    v.id = d.value("id", "");
+    if (d.contains("did")) v.did = d["did"].get<std::string>();
+    if (d.contains("value")) v.value = d["value"];
+    if (d.contains("unit")) v.unit = d["unit"].get<std::string>();
+    if (d.contains("error")) v.error = d["error"].get<std::string>();
+    if (d.contains("message")) v.error_message = d["message"].get<std::string>();
+    return v;
+}
+
+SovdClient::SovdClient(std::string base_url, RetryPolicy retry)
+    : base_url_(base_url), cli_(base_url), retry_(retry) {
     cli_.set_connection_timeout(3, 0);
     cli_.set_read_timeout(10, 0);
 }
@@ -193,6 +194,56 @@ void SovdClient::renew_lock(const std::string &path, const std::string &lock_id,
 
 void SovdClient::release_lock(const std::string &path, const std::string &lock_id) {
     request("DELETE", "/v1/entities/" + path + "/locks/" + lock_id);
+}
+
+void SovdClient::subscribe_data(const std::string &path, const std::string &id, int interval_ms,
+                                 const StreamEventCallback &cb, const std::atomic<bool> *stop_flag) {
+    // A fresh Client, not cli_: this call blocks for the whole subscription
+    // lifetime with a read timeout well past the server's own keep-alive
+    // cadence, which would break cli_'s normal short-request timeouts if
+    // shared.
+    httplib::Client stream_cli(base_url_);
+    stream_cli.set_connection_timeout(3, 0);
+    stream_cli.set_read_timeout(30, 0); // StreamHub's wait_next keep-alive is 15s -- generous headroom, not a race
+
+    std::string url = "/v1/entities/" + path + "/data/" + id + "/stream?interval_ms=" + std::to_string(interval_ms);
+    std::string buffer;
+
+    auto result = stream_cli.Get(url, httplib::Headers{}, [&](const char *data, size_t len) {
+        if (stop_flag && stop_flag->load()) return false;
+        buffer.append(data, len);
+        size_t pos;
+        while ((pos = buffer.find("\n\n")) != std::string::npos) {
+            std::string frame = buffer.substr(0, pos);
+            buffer.erase(0, pos + 2);
+            if (frame.rfind("data: ", 0) == 0) {
+                try {
+                    cb(json::parse(frame.substr(6)));
+                } catch (...) {
+                    // one malformed event shouldn't kill the whole subscription
+                }
+            }
+            // lines starting with ":" are SSE comments (our own keep-alives) -- ignored
+        }
+        return !(stop_flag && stop_flag->load());
+    });
+
+    bool user_requested_stop = stop_flag && stop_flag->load();
+    if (!result) {
+        if (user_requested_stop) return; // deliberate stop, not a failure
+        throw SovdError(0, "TRANSPORT", "stream connection lost: " + httplib::to_string(result.error()));
+    }
+    if (result->status < 200 || result->status >= 300) {
+        std::string code = "HTTP_" + std::to_string(result->status);
+        std::string message = result->body;
+        try {
+            json err = json::parse(result->body);
+            if (err.contains("error")) code = err["error"].get<std::string>();
+            if (err.contains("message")) message = err["message"].get<std::string>();
+        } catch (...) {
+        }
+        throw SovdError(result->status, code, message);
+    }
 }
 
 } // namespace sovd::client

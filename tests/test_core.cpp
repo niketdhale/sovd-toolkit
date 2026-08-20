@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -13,6 +14,7 @@
 #include "sovd/server/config_loader.hpp"
 #include "sovd/server/mqtt_publisher.hpp"
 #include "sovd/server/routes.hpp"
+#include "sovd/server/stream_hub.hpp"
 #include "test_framework.hpp"
 
 using namespace sovd;
@@ -1211,6 +1213,125 @@ entities:
 }
 
 // ---------------------------------------------------------------------
+// Phase 6: StreamHub -- the shared poller behind SSE. Genuinely
+// wall-clock-driven background threads (not a lazily-checked TTL), so like
+// session_manager's heartbeat tests, these use short real intervals with
+// bounded waits rather than an injectable clock (see CLAUDE.md).
+
+using sovd::server::StreamHub;
+
+void test_stream_hub_two_subscribers_share_one_poller() {
+    StreamHub hub;
+    std::atomic<int> read_calls{0};
+    auto read_fn = [&read_calls]() -> std::string { return std::to_string(read_calls.fetch_add(1) + 1); };
+
+    auto sub1 = hub.subscribe("vehicle/body/bcm", "battery_voltage", 30, read_fn);
+    auto sub2 = hub.subscribe("vehicle/body/bcm", "battery_voltage", 30, read_fn);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // ~200ms / 30ms ~= 6-7 ticks from ONE poller. Two independent pollers
+    // (the bug this test exists to catch) would show roughly double that.
+    int calls = read_calls.load();
+    ASSERT_TRUE(calls >= 3);
+    ASSERT_TRUE(calls <= 12);
+
+    std::string v1, v2;
+    ASSERT_TRUE(sub1.wait_next(v1, 500));
+    ASSERT_TRUE(sub2.wait_next(v2, 500));
+}
+
+void test_stream_hub_different_keys_get_independent_pollers() {
+    StreamHub hub;
+    std::atomic<int> calls_a{0};
+    std::atomic<int> calls_b{0};
+
+    auto sub_a = hub.subscribe("vehicle/body/bcm", "battery_voltage", 30,
+                                [&calls_a] { return std::to_string(calls_a.fetch_add(1)); });
+    auto sub_b = hub.subscribe("vehicle/body/door_ctrl", "door_lock_state", 30,
+                                [&calls_b] { return std::to_string(calls_b.fetch_add(1)); });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    // Both pollers ran independently -- neither starved the other.
+    ASSERT_TRUE(calls_a.load() >= 2);
+    ASSERT_TRUE(calls_b.load() >= 2);
+}
+
+void test_stream_hub_poller_stops_after_last_unsubscribe() {
+    StreamHub hub;
+    std::atomic<int> read_calls{0};
+    auto read_fn = [&read_calls]() -> std::string { return std::to_string(read_calls.fetch_add(1)); };
+
+    {
+        auto sub = hub.subscribe("vehicle/body/bcm", "battery_voltage", 20, read_fn);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    } // Subscription destructor unsubscribes; last one stops the poller thread.
+
+    int calls_at_unsubscribe = read_calls.load();
+    ASSERT_TRUE(calls_at_unsubscribe >= 2); // it did actually poll while subscribed
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    ASSERT_EQ(read_calls.load(), calls_at_unsubscribe); // no further ticks once unsubscribed
+}
+
+void test_stream_hub_wait_next_times_out_without_new_value() {
+    StreamHub hub;
+    // Long interval -- but the poller's first read fires immediately on
+    // subscribe (a real subscriber shouldn't wait a full interval just to
+    // see the current value), so the *first* wait_next legitimately
+    // succeeds right away; it's the *second* one that should time out,
+    // since the next tick is 60s away.
+    auto sub = hub.subscribe("vehicle/body/bcm", "battery_voltage", 60000, [] { return std::string("x"); });
+    std::string out;
+    ASSERT_TRUE(sub.wait_next(out, 500));
+    ASSERT_FALSE(sub.wait_next(out, 50));
+}
+
+void test_http_stream_data_emits_sse_frames() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+    cli.set_read_timeout(3, 0);
+
+    std::vector<std::string> frames;
+    std::string buffer;
+    auto res = cli.Get("/v1/entities/vehicle/body/bcm/data/battery_voltage/stream?interval_ms=100", httplib::Headers{},
+                        [&](const char *data, size_t len) {
+                            buffer.append(data, len);
+                            size_t pos;
+                            while ((pos = buffer.find("\n\n")) != std::string::npos) {
+                                frames.push_back(buffer.substr(0, pos));
+                                buffer.erase(0, pos + 2);
+                            }
+                            return frames.size() < 3; // stop the transfer once we've seen enough
+                        });
+    // Deliberately returning false from the content_receiver to end an SSE
+    // stream early (there's no other way -- the stream never ends on its
+    // own) makes httplib report the overall Result as Error::Canceled and
+    // *discards* the Response object entirely (res_ set to nullptr in
+    // ClientImpl::send_) -- confirmed by reading httplib.h, not assumed.
+    // So status/headers aren't asserted here; what actually matters (the
+    // frames themselves, captured independently in the callback above) is.
+    ASSERT_TRUE(res == nullptr);
+    ASSERT_TRUE(res.error() == httplib::Error::Canceled);
+    ASSERT_TRUE(frames.size() >= 3);
+    for (auto &f : frames) {
+        ASSERT_TRUE(f.rfind("data: ", 0) == 0);
+        json body = json::parse(f.substr(6));
+        ASSERT_EQ(body["id"].get<std::string>(), std::string("battery_voltage"));
+        ASSERT_TRUE(std::abs(body["value"].get<double>() - 13.0) < 1e-9);
+    }
+}
+
+void test_http_stream_data_501_for_no_backend() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+    auto res = cli.Get("/v1/entities/vehicle/body/data/anything/stream");
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(res->status, 501);
+}
+
+// ---------------------------------------------------------------------
 
 int main() {
     RUN_TEST(test_registry_add_and_find_root);
@@ -1281,6 +1402,13 @@ int main() {
     RUN_TEST(test_config_loader_sovd_proxy_requires_base_url);
     RUN_TEST(test_config_loader_proxy_forwards_docs_data_and_locks);
     RUN_TEST(test_config_loader_unreachable_proxy_degrades_gracefully);
+
+    RUN_TEST(test_stream_hub_two_subscribers_share_one_poller);
+    RUN_TEST(test_stream_hub_different_keys_get_independent_pollers);
+    RUN_TEST(test_stream_hub_poller_stops_after_last_unsubscribe);
+    RUN_TEST(test_stream_hub_wait_next_times_out_without_new_value);
+    RUN_TEST(test_http_stream_data_emits_sse_frames);
+    RUN_TEST(test_http_stream_data_501_for_no_backend);
 
     return testfw::summary();
 }

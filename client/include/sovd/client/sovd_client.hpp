@@ -10,7 +10,9 @@
 // from every leaf field.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -93,6 +95,13 @@ struct DataValue {
     std::optional<std::string> error_message;
 };
 
+// Parses the {"id","did"?,"value","unit"?} / {"id","error","message"} shape
+// every data-value response uses (GET .../data/{id}, batch items, and SSE
+// stream events all share it) -- public because SSE callers (subscribe_data
+// below) get raw JSON per event and need the same parsing get_data() does
+// internally.
+DataValue parse_data_value(const nlohmann::json &j);
+
 // Retry/backoff on 503/504 only -- explicitly never on 423 (CLAUDE.md:
 // "retrying a lock conflict hammers another tester"). Defaults match the
 // client config schema documented in CLAUDE.md.
@@ -127,10 +136,25 @@ public:
     void renew_lock(const std::string &path, const std::string &lock_id, int ttl_seconds);
     void release_lock(const std::string &path, const std::string &lock_id);
 
+    // Phase 6: client-side SSE subscription handling. Blocking -- runs the
+    // receive loop on the calling thread, invoking cb for each pushed
+    // event, until the server ends the stream or *stop_flag becomes true
+    // (checked between events; the server's own keep-alive cadence bounds
+    // how long a call can go without checking it). Deliberately not
+    // thread-managed by the SDK itself: the caller already has a natural
+    // thread for this (the CLI's `watch` already dedicates its own), so
+    // there's nothing here that owning a background thread would simplify.
+    // Throws SovdError only if the initial connection/handshake fails
+    // outright (e.g. a 501/502 status instead of a stream starting).
+    using StreamEventCallback = std::function<void(const nlohmann::json &event)>;
+    void subscribe_data(const std::string &path, const std::string &id, int interval_ms,
+                         const StreamEventCallback &cb, const std::atomic<bool> *stop_flag = nullptr);
+
 private:
     nlohmann::json request(const std::string &method, const std::string &url_path, const std::string &body = "",
                             const std::string &lock_id = "");
 
+    std::string base_url_; // kept alongside cli_ so subscribe_data can build its own long-read-timeout Client
     httplib::Client cli_;
     RetryPolicy retry_;
 };

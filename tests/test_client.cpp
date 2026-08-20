@@ -1,7 +1,9 @@
 // Phase 5: SovdClient/LockGuard tested against a real live sovd_server
 // (same "test the real path, not a mock of the SDK's own dependency"
 // standard as the rest of this repo) rather than mocking httplib::Client.
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <thread>
 
 #include "httplib.h"
@@ -213,6 +215,62 @@ void test_client_mode_and_operation() {
     (void)result; // mock's op result shape isn't the point here -- just that it doesn't throw
 }
 
+void test_client_subscribe_data_receives_pushed_events() {
+    LiveServer server;
+    SovdClient cli(server.base_url());
+
+    std::atomic<int> event_count{0};
+    std::atomic<bool> stop{false};
+    std::mutex last_mtx;
+    nlohmann::json last_event;
+
+    // The callback only records data -- no ASSERT_* here. testfw's counters
+    // are plain (non-atomic) ints; calling check() from this thread while
+    // the main thread below is concurrently asserting would be a genuine
+    // data race, not just a style nit. All assertions happen on the main
+    // thread, after subscriber.join() below guarantees this thread is done.
+    std::thread subscriber([&] {
+        cli.subscribe_data("vehicle/body/bcm", "battery_voltage", 50,
+                            [&](const nlohmann::json &event) {
+                                {
+                                    std::lock_guard<std::mutex> lk(last_mtx);
+                                    last_event = event;
+                                }
+                                event_count.fetch_add(1);
+                            },
+                            &stop);
+    });
+
+    // Bounded wait for a handful of events, then stop -- proves both the
+    // push (events arrive without this test ever calling get_data) and
+    // that stop_flag actually ends subscribe_data's blocking call.
+    for (int waited_ms = 0; event_count.load() < 3 && waited_ms < 3000; waited_ms += 20) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    stop.store(true);
+    subscriber.join(); // proves subscribe_data actually returned, not left running
+
+    ASSERT_TRUE(event_count.load() >= 3);
+    ASSERT_EQ(last_event.at("id").get<std::string>(), std::string("battery_voltage"));
+    ASSERT_TRUE(std::abs(last_event.at("value").get<double>() - 13.0) < 1e-9);
+}
+
+void test_client_subscribe_data_throws_on_immediate_failure() {
+    LiveServer server;
+    SovdClient cli(server.base_url());
+
+    bool threw = false;
+    try {
+        // vehicle/body is a grouping node (no backend) -> the server
+        // returns 501 immediately instead of starting a stream.
+        cli.subscribe_data("vehicle/body", "anything", 1000, [](const nlohmann::json &) {});
+    } catch (const SovdError &ex) {
+        threw = true;
+        ASSERT_EQ(ex.status, 501);
+    }
+    ASSERT_TRUE(threw);
+}
+
 } // namespace
 
 int main() {
@@ -223,5 +281,7 @@ int main() {
     RUN_TEST(test_client_lock_guard_acquires_and_releases_on_scope_exit);
     RUN_TEST(test_client_lock_guard_heartbeat_keeps_lock_alive_past_original_ttl);
     RUN_TEST(test_client_mode_and_operation);
+    RUN_TEST(test_client_subscribe_data_receives_pushed_events);
+    RUN_TEST(test_client_subscribe_data_throws_on_immediate_failure);
     return testfw::summary();
 }

@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <random>
 #include <regex>
 #include <sstream>
@@ -13,6 +15,7 @@
 
 #include "httplib.h"
 #include "json.hpp"
+#include "sovd/server/oauth2.hpp"
 
 namespace sovd::server {
 
@@ -101,6 +104,77 @@ bool gateway_route_allowed(const std::string &method, const std::string &path) {
         if (m == method && std::regex_match(path, pattern)) return true;
     }
     return false;
+}
+
+// Phase 8: scope required per route, matching exactly the three example
+// scopes CLAUDE.md's client config schema already sketched in Phase 1
+// (read:faults, read:data, execute:routines) rather than inventing finer-
+// grained ones. A null scope means "any authenticated caller" -- topology
+// listing and /docs are self-description, not diagnostic data (the same
+// reasoning /docs already uses to return 200 with no backend rather than
+// 501), so they're gated on having *a* valid token but no specific scope.
+// PUT data, POST modes/operations, and every lock verb are all mutating/
+// privileged actions and share execute:routines rather than each getting
+// its own scope -- CLAUDE.md's sketch never listed more than these three.
+struct ScopedRoute {
+    const char *method;
+    std::regex pattern;
+    const char *required_scope; // nullptr = authenticated, no specific scope
+};
+
+const std::vector<ScopedRoute> &oauth2_scope_table() {
+    static const std::vector<ScopedRoute> table = {
+        {"GET", std::regex(R"(^/v1/entities$)"), nullptr},
+        {"GET", std::regex(R"(^/v1/entities/.+/docs$)"), nullptr},
+        {"GET", std::regex(R"(^/v1/entities/.+/faults$)"), "read:faults"},
+        {"DELETE", std::regex(R"(^/v1/entities/.+/faults$)"), "execute:routines"},
+        {"GET", std::regex(R"(^/v1/entities/.+/data$)"), "read:data"},
+        {"GET", std::regex(R"(^/v1/entities/.+/data/.+/stream$)"), "read:data"},
+        {"GET", std::regex(R"(^/v1/entities/.+/data/.+$)"), "read:data"},
+        {"PUT", std::regex(R"(^/v1/entities/.+/data/.+$)"), "execute:routines"},
+        {"POST", std::regex(R"(^/v1/entities/.+/modes$)"), "execute:routines"},
+        {"POST", std::regex(R"(^/v1/entities/.+/operations/.+$)"), "execute:routines"},
+        {"POST", std::regex(R"(^/v1/entities/.+/locks$)"), "execute:routines"},
+        {"PUT", std::regex(R"(^/v1/entities/.+/locks/[^/]+$)"), "execute:routines"},
+        {"DELETE", std::regex(R"(^/v1/entities/.+/locks/[^/]+$)"), "execute:routines"},
+    };
+    return table;
+}
+
+enum class OAuth2Result { Ok, Unauthorized, Forbidden };
+
+// "/" (version discovery) and any unmatched route are deliberately outside
+// this table -- "/" so a client can always learn api_versions before it has
+// a token to use, and an unmatched route so a bad path 404s from normal
+// routing instead of leaking "route exists but you're unauthorized" through
+// this layer.
+OAuth2Result check_oauth2(const std::string &secret, const std::string &method, const std::string &path,
+                           const std::string &auth_header) {
+    if (path == "/") return OAuth2Result::Ok;
+
+    const char *required_scope = nullptr;
+    bool matched = false;
+    for (auto &route : oauth2_scope_table()) {
+        if (route.method == method && std::regex_match(path, route.pattern)) {
+            required_scope = route.required_scope;
+            matched = true;
+            break;
+        }
+    }
+    if (!matched) return OAuth2Result::Ok;
+
+    static const std::string prefix = "Bearer ";
+    if (auth_header.size() <= prefix.size() || auth_header.compare(0, prefix.size(), prefix) != 0) {
+        return OAuth2Result::Unauthorized;
+    }
+    sovd::server::oauth2::TokenClaims claims;
+    if (!sovd::server::oauth2::verify_token(auth_header.substr(prefix.size()), secret, claims)) {
+        return OAuth2Result::Unauthorized;
+    }
+    if (required_scope && !sovd::server::oauth2::has_scope(claims, required_scope)) {
+        return OAuth2Result::Forbidden;
+    }
+    return OAuth2Result::Ok;
 }
 
 std::string to_hex(const uint8_t *data, size_t len) {
@@ -202,14 +276,35 @@ bool from_hex(std::string s, std::vector<uint8_t> &out) {
 
 } // namespace
 
+// Phase 8: see routes.hpp's ProxyConnection forward-declaration comment.
+// try_lock, not lock, in try_forward(): a second concurrent request against
+// the *same* proxied entity while one is already in flight gets a clean 503
+// instead of queueing behind a mutex -- "bounded queue -> 503" at depth 1,
+// matching that a single entity is already effectively serialized by
+// LockManager for every lock-gated operation anyway.
+class ProxyConnection {
+public:
+    explicit ProxyConnection(const std::string &base_url) : client(base_url) {
+        client.set_connection_timeout(2, 0);
+        client.set_read_timeout(5, 0);
+        client.set_keep_alive(true);
+    }
+
+    httplib::Client client;
+    std::mutex mtx;
+};
+
 Router::Router(EntityRegistry &registry, LockManager &locks, std::string server_id, std::string role)
     : registry_(registry), locks_(locks), server_id_(std::move(server_id)), role_(std::move(role)),
       event_sink_([](const std::string &line) { std::cout << line << std::endl; }),
       telemetry_sink_([](const std::string &line) { std::cout << line << std::endl; }) {}
 
+Router::~Router() = default;
+
 void Router::set_event_sink(EventSink sink) { event_sink_ = std::move(sink); }
 void Router::set_telemetry_sink(EventSink sink) { telemetry_sink_ = std::move(sink); }
 void Router::set_cors_allowed_origins(std::vector<std::string> origins) { cors_allowed_origins_ = std::move(origins); }
+void Router::set_oauth2_secret(std::string secret) { oauth2_secret_ = std::move(secret); }
 
 void Router::apply_cors_headers(const httplib::Request &req, httplib::Response &res) const {
     std::string origin = req.get_header_value("Origin");
@@ -286,6 +381,30 @@ void Router::register_routes(httplib::Server &svr) {
                        {{"method", req.method}, {"path", req.path}, {"correlation_id", corr}});
             write_error(res, 403, "FORBIDDEN", "path/method not permitted on a gateway-tier server");
             return httplib::Server::HandlerResponse::Handled;
+        }
+
+        // Phase 8: bearer-token + scope validation at the external
+        // boundary. Opt-in (oauth2_secret_ empty means disabled, checked
+        // every existing test's default TestServer never wires this) --
+        // when set, every scoped route (see oauth2_scope_table()) needs a
+        // valid, unexpired token, and mutating/privileged routes need the
+        // matching scope on top of that.
+        if (!oauth2_secret_.empty()) {
+            OAuth2Result result =
+                check_oauth2(oauth2_secret_, req.method, req.path, req.get_header_value("Authorization"));
+            if (result != OAuth2Result::Ok) {
+                std::string corr = correlation_id_for(req, res);
+                int status = (result == OAuth2Result::Unauthorized) ? 401 : 403;
+                emit_event(event_sink_, "oauth2_denied",
+                           {{"method", req.method}, {"path", req.path}, {"status", status}, {"correlation_id", corr}});
+                if (status == 401) {
+                    res.set_header("WWW-Authenticate", "Bearer");
+                    write_error(res, 401, "UNAUTHORIZED", "missing or invalid bearer token");
+                } else {
+                    write_error(res, 403, "FORBIDDEN", "token lacks the required scope");
+                }
+                return httplib::Server::HandlerResponse::Handled;
+            }
         }
 
         return httplib::Server::HandlerResponse::Unhandled;
@@ -367,6 +486,10 @@ const catalog::Catalog *Router::find_catalog(const std::string &entity_path) con
 }
 
 void Router::attach_proxy(const std::string &entity_path, ProxyTarget target) {
+    // Created here, before svr.listen() starts (config loading is
+    // single-threaded), not lazily in try_forward() -- lets try_forward()
+    // do a plain, concurrency-safe map lookup with no insertion-time race.
+    proxy_connections_[entity_path] = std::make_unique<ProxyConnection>(target.base_url);
     proxies_.insert_or_assign(entity_path, std::move(target));
 }
 
@@ -380,6 +503,16 @@ bool Router::try_forward(const httplib::Request &req, httplib::Response &res, co
     const ProxyTarget *proxy = find_proxy(entity_path);
     if (!proxy) return false;
 
+    // attach_proxy() always creates the connection alongside the
+    // ProxyTarget, both before svr.listen() starts -- a proxy with no entry
+    // here would be an attach_proxy() bug, not a runtime condition.
+    ProxyConnection &conn = *proxy_connections_.at(entity_path);
+    std::unique_lock<std::mutex> lk(conn.mtx, std::try_to_lock);
+    if (!lk.owns_lock()) {
+        write_error(res, 503, "BUSY", "another request to this proxied entity is already in flight");
+        return true;
+    }
+
     std::string prefix = "/v1/entities/" + entity_path;
     std::string suffix = req.path.size() > prefix.size() ? req.path.substr(prefix.size()) : "";
     std::string remote_url_path = "/v1/entities/" + proxy->remote_path + suffix;
@@ -390,11 +523,7 @@ bool Router::try_forward(const httplib::Request &req, httplib::Response &res, co
     std::string corr = res.get_header_value("X-SOVD-Correlation-Id"); // stamped by correlation_id_for() already
     if (!corr.empty()) headers.emplace("X-SOVD-Correlation-Id", corr);
 
-    httplib::Client cli(proxy->base_url);
-    // Connection pooling per adapter is a Phase 8 item (CLAUDE.md); a fresh
-    // client per forwarded request is the right amount of work for Phase 4.
-    cli.set_connection_timeout(2, 0);
-    cli.set_read_timeout(5, 0);
+    httplib::Client &cli = conn.client;
 
     httplib::Result remote;
     if (req.method == "GET") {

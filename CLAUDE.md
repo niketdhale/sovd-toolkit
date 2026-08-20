@@ -1257,7 +1257,71 @@ else streamed).
 - [ ] **mTLS gateway ↔ domain servers** — internal hop must verify the
       gateway's certificate, **not** trust a forwarded external bearer token
       (otherwise a leaked token becomes lateral movement)
-- [ ] OAuth2 / token auth at the external boundary
+- [x] **OAuth2 / token auth at the external boundary — DONE, 2026-08-20,
+      scoped narrower than the phrase suggests.** Not a full OAuth2
+      authorization server (auth-code flow, client registration, refresh
+      tokens) — issuing tokens is a real IdP's job and a distinct large
+      subsystem this project was never going to build; *verifying* bearer
+      tokens and their scopes is the resource server's actual
+      responsibility, and that's what actually protects the diagnostic
+      interface, so that's what's built. Self-issued HMAC-SHA256 signed
+      tokens (`server/include/sovd/server/oauth2.hpp`,
+      `server/src/oauth2.cpp`) — a minimal JWT (header.payload.signature,
+      base64url each part via OpenSSL's `EVP_EncodeBlock`/`DecodeBlock`,
+      HMAC via OpenSSL's `HMAC()`), the same "hand-roll a minimal protocol
+      slice" call already made for MQTT in Phase 3, and a resource server
+      that only ever verifies tokens it minted itself doesn't need
+      algorithm negotiation (so the header's `alg` field is never read back
+      to select behavior — no algorithm-confusion surface, unlike a general
+      JWT library). Signature comparison is constant-time. Opt-in via
+      `SOVD_OAUTH2_SECRET` (same shape as `SOVD_MQTT_HOST`/`SOVD_CORS_
+      ORIGINS`/`SOVD_AUDIT_LOG_PATH`) — unset means no auth check at all.
+      **Scope-to-route mapping** (`routes.cpp`'s `oauth2_scope_table()`)
+      uses exactly the three scopes CLAUDE.md's own Phase 1 client-config
+      sketch already named (`read:faults`, `read:data`, `execute:routines`)
+      rather than inventing finer-grained ones: reads of faults/data need
+      the matching `read:*` scope; every mutating or privileged route (PUT
+      data, POST modes/operations, all three lock verbs, DELETE faults)
+      needs `execute:routines`; `GET /v1/entities` and `GET .../docs` need
+      only *a* valid token, no specific scope (self-description, not
+      diagnostic data — the same reasoning `/docs` already uses to return
+      200 with no backend rather than 501); `GET /` needs no token at
+      all — a client must be able to learn `api_versions` before it has one
+      to use. Checked in the same pre-routing hook as CORS/the gateway
+      whitelist, after both, so an unauthenticated caller never reaches
+      routing logic. Denials emit an `oauth2_denied` event (method, path,
+      status, correlation_id) for the same IDS-signal reason
+      `gateway_route_denied` does.
+      **`tools/mint_token.cpp` → `sovd_mint_token`**: a tiny standalone tool
+      (secret, comma-separated scopes, ttl → prints a token), added because
+      there's no real IdP in this project to get a token from otherwise,
+      and this feature needed to be live-verifiable the same way every
+      other Phase 8 item was. Not a production tool — a real deployment's
+      tokens come from wherever it manages secrets/identity.
+      OpenSSL is now a **required**, not auto-detected, dependency
+      (`find_package(OpenSSL REQUIRED)`), needed here for HMAC and also by
+      the mTLS item below — confirmed present in this environment (3.6.2).
+      `CPPHTTPLIB_OPENSSL_SUPPORT` is defined **globally** (every target,
+      not per-target) since it changes `httplib::Server`/`Client`'s class
+      layout via conditional members — a per-target mismatch would be an
+      ODR violation across the static-library boundaries this project
+      already has (`sovd_server_lib`, `sovd_client`).
+      **Tests**: `test_http_oauth2_root_exempt_and_missing_token_rejected`,
+      `test_http_oauth2_wrong_secret_and_expired_token_rejected`,
+      `test_http_oauth2_valid_token_missing_scope_gets_403`,
+      `test_http_oauth2_valid_token_with_scope_succeeds` (read, discovery,
+      and a real write all through their correct scopes) — 531 assertions
+      passing in `test_core` (up from 512). A standalone smoke test
+      (mint → verify, plus wrong-secret/tampered/expired all correctly
+      rejected) was run directly against `oauth2.cpp` before wiring it into
+      `routes.cpp`, to isolate crypto-correctness from HTTP-layer wiring.
+      **Verified live** against a real running server
+      (`SOVD_OAUTH2_SECRET=demo-secret`): `GET /` with no token succeeds;
+      a scoped read with no token gets `401` + `WWW-Authenticate: Bearer`;
+      the same read with a `read:faults`-only token gets `403`; with a
+      `read:data` token (minted via `sovd_mint_token`) it succeeds — all
+      four cases, plus both `oauth2_denied` events landing in the server's
+      event stream with correlation ids, confirmed against the real binary.
 - [ ] **SecurityAccess (`0x27`) wiring — needs BOTH halves, see D2.** The
       mechanism is already built and tested in isolation in Phase 2
       (`uds_services` requestSeed/sendKey, plus the clearly-labelled
@@ -1360,13 +1424,67 @@ else streamed).
       `{"lock_id":"lock-2","ttl_seconds":3600}` — both the internal clamp and
       the corrected response-echo confirmed end-to-end, not just at the unit
       level.
-- [ ] Per-adapter bounded request queue → `503` rather than piling up requests
-      the bus cannot service
-- [ ] Per-adapter connection pooling — DoIP routing activation is expensive,
-      don't redo it per request
-- [ ] **Explicit persistence decisions:** locks should *not* survive restart
-      (a restart should release them); audit logs and job status should.
-      "All in memory" is a decision, not a default.
+- [x] **Per-adapter bounded request queue + connection pooling — DONE,
+      2026-08-20, one mechanism for both.** uds_doip already had this by
+      construction (`UdsDoipContext` holds one `DoipTransport` for the
+      adapter's whole lifetime — routing activation happens once, not per
+      request); the real gap was `sovd_proxy` forwarding, where
+      `try_forward()` built a fresh `httplib::Client` (fresh TCP handshake)
+      on every single forwarded request. Fixed with `ProxyConnection`
+      (`routes.cpp`): one persistent `httplib::Client` per proxied entity,
+      created in `attach_proxy()` alongside its `ProxyTarget` (both before
+      `svr.listen()` starts, so the lookup in `try_forward()` needs no
+      locking of its own). A `std::try_lock` on the connection's mutex
+      doubles as the bounded queue: a second concurrent request against the
+      *same* proxied entity while one is already in flight gets a clean
+      `503`, depth 1, rather than queueing behind the connection — matching
+      that a single entity is already effectively serialized by
+      `LockManager` for every lock-gated operation anyway. `routes.hpp`
+      forward-declares both `httplib::Client` and `ProxyConnection` (an
+      out-of-line `~Router()` handles the resulting incomplete-type member)
+      so this doesn't pull `httplib.h` into the header.
+      **Tests**: `test_http_proxy_bounded_queue_returns_503_on_concurrent_
+      request` — a synthetic "slow domain" double blocks its handler on a
+      condition variable (no sleep) until explicitly released, giving
+      deterministic control over a real two-thread race: a background
+      request occupies the entity's one connection, a second concurrent
+      request from a separate `httplib::Client` gets `503`, then releasing
+      the first proves it still completes normally (`200`). Existing proxy
+      tests (`test_config_loader_proxy_forwards_docs_data_and_locks`) are
+      unchanged and still pass, proving the pooling refactor didn't change
+      correctness. 512 assertions passing (up from 509).
+      **Verified live** against the real two-tier demo: sequential repeated
+      reads to the same proxied entity all return `200` (the persistent
+      connection survives reuse, doesn't go stale); firing 20 real parallel
+      curls at the same proxied entity produced a mix of `503`s and `200`s
+      matching the depth-1 bounded-queue behavior exactly, live, not just
+      in the synthetic unit test.
+- [x] **Explicit persistence decisions — DONE, 2026-08-20.** Locks: already
+      correct by construction, no code needed — `LockManager` is pure
+      in-memory with no persistence layer at all, so a restart already
+      releases every held lock. Job status: nothing to decide — async job
+      polling is a stated non-goal, so there's no job-status concept in this
+      codebase to persist. Audit logs (the actual gap): security events
+      (`Router::set_event_sink`) previously only ever reached stdout or an
+      opt-in MQTT publish — stdout is lost with the process, and a down or
+      unreachable broker means MQTT never durably lands an event at all, so
+      neither actually satisfied "audit logs should survive a restart."
+      Fixed with an opt-in `SOVD_AUDIT_LOG_PATH` env var (`main.cpp`, same
+      shape as `SOVD_MQTT_HOST`/`SOVD_CORS_ORIGINS`): when set, every
+      security event is also appended (`std::ios::app`, never truncated) to
+      that file, mutex-serialized since `std::ofstream` isn't safe for
+      concurrent writers and `event_sink_` is invoked from httplib's
+      worker-thread pool. Composes with MQTT rather than replacing it —
+      both fire per event if both are configured; deliberately scoped to
+      `event_sink_` only, not `telemetry_sink_` (per-request latency),
+      matching the existing "an IDS should not be your APM" separation.
+      **Verified live**: with `SOVD_AUDIT_LOG_PATH=/tmp/sovd_audit.log` and
+      no MQTT configured, a real `POST .../locks` produced a `lock_acquired`
+      line in the audit file and *not* on stdout (stdout carried only the
+      `http_request` telemetry line, confirming `event_sink_` was correctly
+      replaced while `telemetry_sink_` stayed on its own default) — the
+      separation and the file-sink wiring both confirmed against the real
+      server, not just read from the code.
 
 ---
 

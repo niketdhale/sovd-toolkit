@@ -46,6 +46,14 @@ struct DataItem {
     Access access = Access::Read;
     bool io_control = false; // true => 0x2F IOControl instead of 0x2E Write
     std::optional<std::string> requires_session;
+    // Phase 8 (D2): what the ECU demands, parallel to requires_session --
+    // an odd UDS SecurityAccess requestSeed level (ISO 14229-1), e.g. 1 for
+    // "level 1" (0x01 requestSeed / 0x02 sendKey). Gating on this is one
+    // half of D2; the other half (whether *this client* is permitted to
+    // request that level) is an OAuth2 scope check in routes.cpp -- this
+    // field only ever answers "what does the ECU require," never "who's
+    // allowed to ask for it."
+    std::optional<int> requires_security_level;
 
     int length = 0;                  // type == String
     Encoding encoding;                // type == Float

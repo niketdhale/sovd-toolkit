@@ -3,6 +3,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -16,6 +17,7 @@ namespace httplib {
 class Server;
 class Request;
 class Response;
+class Client;
 } // namespace httplib
 
 namespace sovd::server {
@@ -37,6 +39,15 @@ struct ProxyTarget {
     std::string remote_path; // full path on the remote server
 };
 
+// Phase 8: one persistent httplib::Client per proxied entity (created
+// alongside its ProxyTarget in attach_proxy(), before svr.listen() starts),
+// reused across requests instead of paying a fresh TCP handshake every
+// forward -- the proxy-forwarding analogue of uds_doip's DoipTransport
+// already being a persistent per-adapter-instance connection. Defined in
+// routes.cpp (needs httplib::Client's complete type); forward-declared here
+// so routes.hpp doesn't have to include httplib.h just for this member.
+class ProxyConnection;
+
 class Router {
 public:
     // Receives one already-serialized JSON event line. Default sink writes
@@ -46,6 +57,9 @@ public:
     using EventSink = std::function<void(const std::string &)>;
 
     Router(EntityRegistry &registry, LockManager &locks, std::string server_id, std::string role);
+    // Out-of-line: proxy_connections_ holds unique_ptr<ProxyConnection>, and
+    // ProxyConnection is only a complete type in routes.cpp.
+    ~Router();
 
     // Phase 4: the config loader needs a Router to exist before it can
     // attach catalogs/proxies while parsing entities, but server_id/role
@@ -82,6 +96,13 @@ public:
     // denied by the browser's own same-origin policy; CORS is opt-in
     // per-deployment, not on by default.
     void set_cors_allowed_origins(std::vector<std::string> origins);
+
+    // Phase 8: bearer-token + scope validation at the external boundary.
+    // Opt-in (empty = disabled, matching CORS/the audit log's opt-in
+    // shape) -- unset means no auth check at all, same "off by default"
+    // reasoning as everything else added in Phase 8. See oauth2.hpp for
+    // what the token scheme does and deliberately doesn't cover.
+    void set_oauth2_secret(std::string secret);
 
 private:
     void handle_root(const httplib::Request &req, httplib::Response &res);
@@ -145,10 +166,12 @@ private:
     std::string role_;
     std::unordered_map<std::string, catalog::Catalog> catalogs_;
     std::unordered_map<std::string, ProxyTarget> proxies_;
+    std::unordered_map<std::string, std::unique_ptr<ProxyConnection>> proxy_connections_;
     EventSink event_sink_;
     EventSink telemetry_sink_;
     StreamHub stream_hub_;
     std::vector<std::string> cors_allowed_origins_;
+    std::string oauth2_secret_;
 };
 
 } // namespace sovd::server

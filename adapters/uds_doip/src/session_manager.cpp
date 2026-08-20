@@ -17,6 +17,11 @@ uint8_t SessionManager::current_session_type() const {
     return current_session_type_;
 }
 
+uint8_t SessionManager::current_security_level() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return current_security_level_;
+}
+
 // Signals the heartbeat thread to stop and joins it. NEVER call this while
 // holding mtx_: heartbeat_loop() acquires mtx_ itself on every wake-up to
 // check the stop flag, so joining under the same lock can deadlock against
@@ -75,7 +80,39 @@ bool SessionManager::revert_to_default() {
     stop_heartbeat_locked();
     lk.lock();
     current_session_type_ = 0x01;
+    // Real ECUs tie SecurityAccess to the session it was unlocked in --
+    // reverting the session drops it too, matching that behavior rather
+    // than leaving stale bookkeeping that claims a level is still unlocked
+    // against an ECU that no longer agrees.
+    current_security_level_ = 0;
     return confirmed;
+}
+
+bool SessionManager::ensure_security_level(uint8_t level) {
+    std::unique_lock<std::mutex> lk(mtx_);
+    last_touch_ = std::chrono::steady_clock::now();
+
+    if (current_security_level_ >= level) {
+        return true;
+    }
+    lk.unlock();
+
+    auto seed_req = uds::encode_security_access_request_seed(level);
+    std::vector<uint8_t> seed_resp;
+    if (!send_(seed_req, seed_resp)) return false;
+    std::vector<uint8_t> seed;
+    if (!uds::decode_security_access_seed(seed_resp, level, seed)) return false;
+
+    auto key = uds::derive_key_DEMO_ONLY_NOT_SECURE(seed, level);
+    auto send_key_level = static_cast<uint8_t>(level + 1);
+    auto key_req = uds::encode_security_access_send_key(send_key_level, key);
+    std::vector<uint8_t> key_resp;
+    if (!send_(key_req, key_resp)) return false;
+    if (!uds::decode_security_access_key_accepted(key_resp, send_key_level)) return false;
+
+    lk.lock();
+    current_security_level_ = level;
+    return true;
 }
 
 void SessionManager::heartbeat_loop() {
@@ -91,6 +128,7 @@ void SessionManager::heartbeat_loop() {
                              .count();
         if (idle_for >= config_.idle_timeout_ms) {
             current_session_type_ = 0x01;
+            current_security_level_ = 0; // same reasoning as revert_to_default(): tied to the session
             heartbeat_running_.store(false);
             return; // thread exits; left joinable for the next stop_heartbeat_locked()/destructor
         }

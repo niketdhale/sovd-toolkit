@@ -124,6 +124,18 @@ struct UdsDoipContext {
         if (!uds::session_name_to_type(*item->requires_session, session_type)) return true;
         return session_mgr->ensure_session(session_type);
     }
+
+    // Phase 8 (D2): the ECU-demands half of SecurityAccess gating, parallel
+    // to ensure_session_for_did above. The OAuth2-scope half (is *this
+    // client* allowed to ask) already ran in routes.cpp before this adapter
+    // was ever called -- this function has no HTTP/auth knowledge of its
+    // own, same layering as everything else in this file.
+    bool ensure_security_for_did(uint16_t did) {
+        if (!has_catalog) return true;
+        const sovd::catalog::DataItem *item = catalog_data.find_by_did(did);
+        if (!item || !item->requires_security_level) return true;
+        return session_mgr->ensure_security_level(static_cast<uint8_t>(*item->requires_security_level));
+    }
 };
 
 UdsDoipContext *context(sovd_adapter_ctx *ctx) { return reinterpret_cast<UdsDoipContext *>(ctx); }
@@ -242,6 +254,10 @@ sovd_result_t uds_doip_write_data(sovd_adapter_ctx *raw_ctx, const char *entity_
     if (!parse_hex_u16(did_str, did)) return SOVD_BAD_REQUEST;
 
     if (!c->ensure_session_for_did(did)) return SOVD_TRANSPORT;
+    // After session escalation: real ECUs typically only accept
+    // SecurityAccess outside the default session, so session-first ordering
+    // matches how a real UDS stack actually behaves, not just convenience.
+    if (!c->ensure_security_for_did(did)) return SOVD_FORBIDDEN;
 
     bool io_control = false;
     if (c->has_catalog) {

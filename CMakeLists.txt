@@ -23,6 +23,19 @@ if(PkgConfig_FOUND)
 endif()
 option(SOVD_CLIENT_MDNS "Build mDNS discovery/advertising (needs avahi-client)" ${AVAHI_CLIENT_FOUND})
 
+# Phase 8 hardening: mTLS (gateway<->domain) needs httplib's SSLServer/
+# SSLClient, and OAuth2 token verification needs HMAC -- both from OpenSSL.
+# Required, not auto-detected like avahi: unlike mDNS (a Linux-desktop
+# convenience), TLS and token auth are exactly what "hardening" means, and
+# OpenSSL is standard on any real deployment target for this project (in-
+# vehicle Linux HPCs included), confirmed present in this environment.
+# Global compile definition, not per-target: CPPHTTPLIB_OPENSSL_SUPPORT
+# changes httplib::Server/Client's class layout (conditional members), so
+# every translation unit that includes httplib.h must see the same value or
+# risk an ODR violation across static-library boundaries.
+find_package(OpenSSL REQUIRED)
+add_compile_definitions(CPPHTTPLIB_OPENSSL_SUPPORT)
+
 add_compile_options(-Wall -Wextra -Wpedantic)
 
 find_package(Threads REQUIRED)
@@ -90,9 +103,10 @@ add_library(sovd_server_lib STATIC
     server/src/routes.cpp
     server/src/mqtt_publisher.cpp
     server/src/stream_hub.cpp
+    server/src/oauth2.cpp
 )
 target_include_directories(sovd_server_lib PUBLIC server/include third_party)
-target_link_libraries(sovd_server_lib PUBLIC sovd_core sovd_catalog Threads::Threads)
+target_link_libraries(sovd_server_lib PUBLIC sovd_core sovd_catalog Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 
 # --- config loader (Phase 4): YAML topology -> registry/router. Instantiates
 # concrete adapters directly (same responsibility main.cpp's hardcoded
@@ -123,7 +137,7 @@ add_library(sovd_client STATIC
     client/src/lock_guard.cpp
 )
 target_include_directories(sovd_client PUBLIC client/include third_party)
-target_link_libraries(sovd_client PUBLIC Threads::Threads)
+target_link_libraries(sovd_client PUBLIC Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 if(SOVD_CLIENT_MDNS)
     target_sources(sovd_client PRIVATE client/src/mdns_discovery.cpp)
     target_link_libraries(sovd_client PUBLIC ${AVAHI_CLIENT_LIBRARIES})
@@ -147,6 +161,10 @@ if(SOVD_CLIENT_MDNS)
     target_link_libraries(sovd_server PRIVATE sovd_mdns_advertise)
     target_compile_definitions(sovd_server PRIVATE SOVD_HAVE_MDNS=1)
 endif()
+
+# Phase 8: test-token minting for SOVD_OAUTH2_SECRET -- see tools/mint_token.cpp.
+add_executable(sovd_mint_token tools/mint_token.cpp)
+target_link_libraries(sovd_mint_token PRIVATE sovd_server_lib)
 
 # --- tests ---
 enable_testing()

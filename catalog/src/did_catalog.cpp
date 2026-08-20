@@ -79,6 +79,9 @@ DataItem parse_data_item(const YAML::Node &item) {
     std::string session = optional_string(item, "requires_session");
     if (!session.empty()) d.requires_session = session;
 
+    int security_level = optional_scalar<int>(item, "requires_security_level", 0);
+    if (security_level > 0) d.requires_security_level = security_level;
+
     switch (d.type) {
         case DataType::String:
             d.length = optional_scalar<int>(item, "length", 0);

@@ -1,7 +1,9 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -14,6 +16,7 @@
 #include "sovd/lock_manager.hpp"
 #include "sovd/server/config_loader.hpp"
 #include "sovd/server/mqtt_publisher.hpp"
+#include "sovd/server/oauth2.hpp"
 #include "sovd/server/routes.hpp"
 #include "sovd/server/stream_hub.hpp"
 #include "test_framework.hpp"
@@ -1301,6 +1304,92 @@ void test_http_gateway_whitelist_allows_every_real_route() {
     ASSERT_FALSE(stream_denied);
 }
 
+// ---------------------------------------------------------------------
+// Phase 8: bearer-token + scope validation. Off by default (TestServer
+// never calls set_oauth2_secret), matching CORS/the gateway whitelist's
+// same opt-in shape -- each test here configures it explicitly.
+
+void test_http_oauth2_root_exempt_and_missing_token_rejected() {
+    TestServer ts;
+    ts.router.set_oauth2_secret("test-secret");
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    // "/" (version discovery) needs no token even with OAuth2 configured --
+    // a client must be able to learn api_versions before it has one to use.
+    auto root = cli.Get("/");
+    ASSERT_TRUE(root != nullptr);
+    ASSERT_EQ(root->status, 200);
+
+    // A scoped route with no Authorization header at all is 401, not a
+    // silent pass-through.
+    auto no_token = cli.Get("/v1/entities/vehicle/body/bcm/data/vin");
+    ASSERT_TRUE(no_token != nullptr);
+    ASSERT_EQ(no_token->status, 401);
+    ASSERT_EQ(no_token->get_header_value("WWW-Authenticate"), "Bearer");
+}
+
+void test_http_oauth2_wrong_secret_and_expired_token_rejected() {
+    TestServer ts;
+    ts.router.set_oauth2_secret("test-secret");
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    std::string wrong_secret_token = sovd::server::oauth2::mint_token("not-the-secret", {"read:data"}, 60);
+    auto bad = cli.Get("/v1/entities/vehicle/body/bcm/data/vin",
+                        httplib::Headers{{"Authorization", "Bearer " + wrong_secret_token}});
+    ASSERT_TRUE(bad != nullptr);
+    ASSERT_EQ(bad->status, 401);
+
+    std::string expired = sovd::server::oauth2::mint_token("test-secret", {"read:data"}, -10);
+    auto expired_res =
+        cli.Get("/v1/entities/vehicle/body/bcm/data/vin", httplib::Headers{{"Authorization", "Bearer " + expired}});
+    ASSERT_TRUE(expired_res != nullptr);
+    ASSERT_EQ(expired_res->status, 401);
+}
+
+void test_http_oauth2_valid_token_missing_scope_gets_403() {
+    TestServer ts;
+    ts.router.set_oauth2_secret("test-secret");
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    // Valid, unexpired token -- but read:faults, not read:data.
+    std::string token = sovd::server::oauth2::mint_token("test-secret", {"read:faults"}, 60);
+    auto res = cli.Get("/v1/entities/vehicle/body/bcm/data/vin", httplib::Headers{{"Authorization", "Bearer " + token}});
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(res->status, 403);
+}
+
+void test_http_oauth2_valid_token_with_scope_succeeds() {
+    TestServer ts;
+    ts.router.set_oauth2_secret("test-secret");
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    std::string data_token = sovd::server::oauth2::mint_token("test-secret", {"read:data"}, 60);
+    auto data_res =
+        cli.Get("/v1/entities/vehicle/body/bcm/data/vin", httplib::Headers{{"Authorization", "Bearer " + data_token}});
+    ASSERT_TRUE(data_res != nullptr);
+    ASSERT_EQ(data_res->status, 200);
+
+    // /v1/entities and /docs need only *a* valid token, no specific scope --
+    // self-description, not diagnostic data.
+    std::string any_token = sovd::server::oauth2::mint_token("test-secret", {"read:data"}, 60);
+    auto entities_res = cli.Get("/v1/entities", httplib::Headers{{"Authorization", "Bearer " + any_token}});
+    ASSERT_TRUE(entities_res != nullptr);
+    ASSERT_EQ(entities_res->status, 200);
+    auto docs_res =
+        cli.Get("/v1/entities/vehicle/body/bcm/docs", httplib::Headers{{"Authorization", "Bearer " + any_token}});
+    ASSERT_TRUE(docs_res != nullptr);
+    ASSERT_EQ(docs_res->status, 200);
+
+    // execute:routines gates the write side. door_lock_state (not vin) is
+    // the read_write item in kSampleCatalogYaml.
+    std::string write_token = sovd::server::oauth2::mint_token("test-secret", {"execute:routines"}, 60);
+    auto write_res = cli.Put("/v1/entities/vehicle/body/bcm/data/door_lock_state",
+                              httplib::Headers{{"Authorization", "Bearer " + write_token}}, R"({"value":"locked"})",
+                              "application/json");
+    ASSERT_TRUE(write_res != nullptr);
+    ASSERT_EQ(write_res->status, 204);
+}
+
 // Pure MQTT packet framing -- no socket, no broker. Matches the
 // doip_protocol precedent: wire-format encode/decode is unit-testable on
 // its own, independent of the transport that carries it.
@@ -1581,6 +1670,87 @@ entities:
     ASSERT_EQ(ok->status, 200);
 }
 
+// Phase 8: per-adapter connection pooling doubles as the bounded-request-
+// queue mechanism (routes.cpp's ProxyConnection) -- a second concurrent
+// request against the *same* proxied entity while one is already in flight
+// must get a clean 503, not queue behind the entity's one persistent
+// connection. A synthetic "slow domain" double blocks its handler on a
+// condition variable until explicitly released, giving deterministic
+// control over the timing with no sleep involved.
+void test_http_proxy_bounded_queue_returns_503_on_concurrent_request() {
+    httplib::Server slow_domain;
+    std::mutex gate_mtx;
+    std::condition_variable gate_cv;
+    bool release_handler = false;
+    bool handler_entered = false;
+
+    slow_domain.Get("/v1/entities/vehicle/body/bcm/data/vin", [&](const httplib::Request &, httplib::Response &res) {
+        {
+            std::lock_guard<std::mutex> lk(gate_mtx);
+            handler_entered = true;
+        }
+        gate_cv.notify_all();
+        std::unique_lock<std::mutex> lk(gate_mtx);
+        gate_cv.wait(lk, [&] { return release_handler; });
+        res.set_content(R"({"id":"vin","value":"1"})", "application/json");
+    });
+    int slow_port = slow_domain.bind_to_any_port("127.0.0.1");
+    std::thread slow_thread([&] { slow_domain.listen_after_bind(); });
+    slow_domain.wait_until_ready();
+
+    std::ostringstream gw_yaml;
+    gw_yaml << "server: {id: sovd-gateway-queue-test, port: 0, role: gateway}\n"
+               "entities:\n"
+               "  - path: vehicle\n"
+               "    type: vehicle\n"
+               "  - path: vehicle/body\n"
+               "    type: area\n"
+               "  - path: vehicle/body/bcm\n"
+               "    type: component\n"
+               "    adapter:\n"
+               "      kind: sovd_proxy\n"
+               "      base_url: http://127.0.0.1:"
+            << slow_port
+            << "\n"
+               "      remote_path: vehicle/body/bcm\n";
+    ConfigLoadedServer gateway(gw_yaml.str());
+
+    // Two separate clients -- httplib::Client isn't safe for concurrent use
+    // from multiple threads on one instance, and this test needs two real
+    // concurrent requests in flight against the gateway at once.
+    httplib::Client cli1("127.0.0.1", gateway.port);
+    httplib::Client cli2("127.0.0.1", gateway.port);
+
+    std::atomic<int> first_status{0};
+    std::thread first_request([&] {
+        auto res = cli1.Get("/v1/entities/vehicle/body/bcm/data/vin");
+        if (res) first_status = res->status;
+    });
+
+    // Wait until the slow handler is genuinely entered -- i.e. the gateway's
+    // one persistent connection to this entity is actually occupied, not
+    // just "a request was sent."
+    {
+        std::unique_lock<std::mutex> lk(gate_mtx);
+        gate_cv.wait(lk, [&] { return handler_entered; });
+    }
+
+    auto second = cli2.Get("/v1/entities/vehicle/body/bcm/data/vin");
+    ASSERT_TRUE(second != nullptr);
+    ASSERT_EQ(second->status, 503);
+
+    {
+        std::lock_guard<std::mutex> lk(gate_mtx);
+        release_handler = true;
+    }
+    gate_cv.notify_all();
+    first_request.join();
+    ASSERT_EQ(first_status.load(), 200);
+
+    slow_domain.stop();
+    slow_thread.join();
+}
+
 // ---------------------------------------------------------------------
 // Phase 6: StreamHub -- the shared poller behind SSE. Genuinely
 // wall-clock-driven background threads (not a lazily-checked TTL), so like
@@ -1776,6 +1946,10 @@ int main() {
     RUN_TEST(test_http_cors_applies_to_sse_stream_endpoint);
     RUN_TEST(test_http_gateway_whitelist_denies_unlisted_path);
     RUN_TEST(test_http_gateway_whitelist_allows_every_real_route);
+    RUN_TEST(test_http_oauth2_root_exempt_and_missing_token_rejected);
+    RUN_TEST(test_http_oauth2_wrong_secret_and_expired_token_rejected);
+    RUN_TEST(test_http_oauth2_valid_token_missing_scope_gets_403);
+    RUN_TEST(test_http_oauth2_valid_token_with_scope_succeeds);
 
     RUN_TEST(test_mqtt_encode_connect_packet);
     RUN_TEST(test_mqtt_encode_publish_packet);
@@ -1787,6 +1961,7 @@ int main() {
     RUN_TEST(test_config_loader_unknown_adapter_kind_falls_back_to_grouping_node);
     RUN_TEST(test_config_loader_sovd_proxy_requires_base_url);
     RUN_TEST(test_config_loader_proxy_forwards_docs_data_and_locks);
+    RUN_TEST(test_http_proxy_bounded_queue_returns_503_on_concurrent_request);
     RUN_TEST(test_config_loader_unreachable_proxy_degrades_gracefully);
 
     RUN_TEST(test_stream_hub_two_subscribers_share_one_poller);

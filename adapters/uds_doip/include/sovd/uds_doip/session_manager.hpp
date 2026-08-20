@@ -60,6 +60,20 @@ public:
 
     uint8_t current_session_type() const;
 
+    // Phase 8 (D2): ensures the given SecurityAccess level is unlocked,
+    // performing the 0x27 requestSeed/sendKey exchange if not already at
+    // this level or higher -- a no-op returning true otherwise. Odd `level`
+    // is the requestSeed sub-function per ISO 14229-1's convention; the
+    // matching sendKey sub-function (level+1) is derived internally, not a
+    // separate parameter. Real key derivation is OEM-proprietary and
+    // secret (CLAUDE.md); this calls uds_services.hpp's clearly-labeled
+    // derive_key_DEMO_ONLY_NOT_SECURE stand-in -- never use this outside
+    // this project's own tests/demo. Reuses send_, the same serialized
+    // transport-access path ensure_session already uses, so this and the
+    // heartbeat thread never race on the socket either.
+    bool ensure_security_level(uint8_t level);
+    uint8_t current_security_level() const;
+
 private:
     void heartbeat_loop();
     void start_heartbeat_locked();
@@ -70,6 +84,7 @@ private:
 
     mutable std::mutex mtx_;
     uint8_t current_session_type_ = 0x01;
+    uint8_t current_security_level_ = 0; // 0 = locked/default, matches ISO 14229-1's "no level unlocked"
     std::chrono::steady_clock::time_point last_touch_;
 
     std::thread heartbeat_thread_;

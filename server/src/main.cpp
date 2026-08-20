@@ -2,6 +2,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <vector>
 
@@ -58,6 +59,18 @@ void build_topology(EntityRegistry &registry) {
               << std::endl;
 }
 #endif
+
+// Phase 8: explicit persistence decision (CLAUDE.md). Security events, not
+// stdout or a single MQTT publish, are what actually needs to survive a
+// process restart -- stdout is lost with the process, and a down/
+// unreachable broker means MQTT never durably lands an event at all.
+// std::ofstream isn't safe for concurrent writers, and event_sink_ is
+// invoked from httplib's worker-thread pool, so writes are serialized here.
+struct AuditLog {
+    std::ofstream file;
+    std::mutex mtx;
+    explicit AuditLog(const char *path) : file(path, std::ios::app) {}
+};
 
 } // namespace
 
@@ -128,19 +141,51 @@ int main(int argc, char **argv) {
     // per-request telemetry ("an IDS should not be your APM", CLAUDE.md).
     // server_id in the topic path means multi-server topology needs no
     // rework here — each server already publishes under its own name.
+    std::shared_ptr<sovd::server::mqtt::MqttPublisher> events_pub;
+    std::shared_ptr<sovd::server::mqtt::MqttPublisher> telemetry_pub;
     if (const char *mqtt_host = std::getenv("SOVD_MQTT_HOST")) {
         int mqtt_port = 1883;
         if (const char *p = std::getenv("SOVD_MQTT_PORT")) mqtt_port = std::atoi(p);
 
-        auto events_pub = std::make_shared<sovd::server::mqtt::MqttPublisher>(
+        events_pub = std::make_shared<sovd::server::mqtt::MqttPublisher>(
             mqtt_host, static_cast<uint16_t>(mqtt_port), server_id + "-events", "sovd/" + server_id + "/events");
-        auto telemetry_pub = std::make_shared<sovd::server::mqtt::MqttPublisher>(
+        telemetry_pub = std::make_shared<sovd::server::mqtt::MqttPublisher>(
             mqtt_host, static_cast<uint16_t>(mqtt_port), server_id + "-telemetry",
             "sovd/" + server_id + "/telemetry");
-
-        router.set_event_sink([events_pub](const std::string &line) { events_pub->publish(line); });
-        router.set_telemetry_sink([telemetry_pub](const std::string &line) { telemetry_pub->publish(line); });
         std::cout << "MQTT event/telemetry publishing to " << mqtt_host << ":" << mqtt_port << std::endl;
+    }
+
+    // Phase 8: durable local audit trail for security events, independent
+    // of whether MQTT is configured or its broker is even reachable. Opt-in
+    // via env var, same shape as MQTT/CORS/mDNS above/below. Composes with
+    // MQTT rather than replacing it (both fire per event if both are set).
+    // No job-status persistence to decide here -- async job polling is a
+    // stated non-goal (CLAUDE.md), so there's no job state to persist.
+    // Locks are the other half of this decision: already correctly
+    // in-memory-only, since LockManager has no persistence at all and a
+    // restart already releases every held lock by construction.
+    std::shared_ptr<AuditLog> audit_log;
+    if (const char *audit_path = std::getenv("SOVD_AUDIT_LOG_PATH")) {
+        auto candidate = std::make_shared<AuditLog>(audit_path);
+        if (!candidate->file.is_open()) {
+            std::cerr << "warning: failed to open audit log at " << audit_path << std::endl;
+        } else {
+            audit_log = candidate;
+            std::cout << "audit log: appending security events to " << audit_path << std::endl;
+        }
+    }
+
+    if (events_pub || audit_log) {
+        router.set_event_sink([events_pub, audit_log](const std::string &line) {
+            if (events_pub) events_pub->publish(line);
+            if (audit_log) {
+                std::lock_guard<std::mutex> lk(audit_log->mtx);
+                audit_log->file << line << std::endl;
+            }
+        });
+    }
+    if (telemetry_pub) {
+        router.set_telemetry_sink([telemetry_pub](const std::string &line) { telemetry_pub->publish(line); });
     }
 
     // B2: CORS in the hardcoded-demo path is the same opt-in-via-env-var
@@ -156,6 +201,18 @@ int main(int argc, char **argv) {
         }
         router.set_cors_allowed_origins(origins);
         std::cout << "CORS allowed for " << origins.size() << " origin(s)" << std::endl;
+    }
+
+    // Phase 8: bearer-token + scope validation at the external boundary,
+    // same opt-in-via-env-var shape as CORS/MQTT/the audit log -- unset
+    // means no auth check at all, so `./sovd_server` still runs exactly as
+    // before with no config file. A real deployment gets this secret from
+    // wherever it manages other secrets; there's no IdP in this project to
+    // issue it automatically (see oauth2.hpp's scoping note) -- mint test
+    // tokens with the sovd_mint_token tool.
+    if (const char *oauth2_secret = std::getenv("SOVD_OAUTH2_SECRET")) {
+        router.set_oauth2_secret(oauth2_secret);
+        std::cout << "OAuth2 bearer-token validation enabled" << std::endl;
     }
 
     // mDNS advertising is opt-in the same way MQTT is -- unset means no

@@ -716,8 +716,11 @@ void test_end_to_end_http_through_real_adapter() {
     std::string lock_id = json::parse(lock_res->body)["lock_id"].get<std::string>();
     httplib::Headers headers = {{"X-SOVD-Lock-Id", lock_id}};
 
-    auto write_res = cli.Put("/v1/entities/vehicle/body/bcm/data/door_lock_state", headers, R"({"value":"02"})",
-                              "application/json");
+    // B1 (Phase 7 blocker): named ids now take a typed value (the enum
+    // label), not hex -- "deadlocked" is catalogs/bcm.yaml's label for 2,
+    // same raw value "02" used to write directly.
+    auto write_res = cli.Put("/v1/entities/vehicle/body/bcm/data/door_lock_state", headers,
+                              R"({"value":"deadlocked"})", "application/json");
     ASSERT_TRUE(write_res != nullptr);
     ASSERT_EQ(write_res->status, 204);
 

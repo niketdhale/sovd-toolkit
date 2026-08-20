@@ -4,6 +4,45 @@ Context file for Claude Code. Read this first before touching the repo.
 
 ---
 
+## STATUS AT A GLANCE
+
+**Phases 0–6: COMPLETE.** 381 assertions in the default build (`test_core`
+381 includes B1/B2 coverage, `test_client` 32), plus 180 in `test_uds_doip`
+when `-DSOVD_ADAPTER_UDS_DOIP=ON`. Clean under `-Wall -Wextra -Wpedantic` in
+every documented configuration, including the previously-broken
+`-DSOVD_ADAPTER_MOCK=OFF -DSOVD_ADAPTER_UDS_DOIP=ON` restricted combination
+(B3, fixed).
+
+**B1, B2, and B3 are all DONE (2026-08-20).** All three open decisions are
+settled. Nothing left blocking Phase 7 UI code — the four screens can start.
+
+### Blockers (server-side, must land before UI code)
+| id | What | Blocks | Where it's specified |
+|---|---|---|---|
+| **B1** ✅ | Catalog `encode()` (typed value → bytes) + pre-adapter validation | DONE 2026-08-20 | Phase 7 § Blockers |
+| **B2** ✅ | CORS in `routes.cpp` (allow-list, `OPTIONS`, `X-SOVD-*` headers, SSE verified separately) | DONE 2026-08-20 | Phase 7 § Blockers |
+| **B3** ✅ | Fix `SOVD_ADAPTER_MOCK=OFF` + `UDS_DOIP=ON` build break | DONE 2026-08-20 | Phase 8, first item |
+
+### Decisions — SETTLED 2026-08-20 (owner confirmed, not agent-picked)
+| id | Decision | Resolution |
+|---|---|---|
+| **D1** | UI points at gateway or domain server? | **Domain server directly.** All four screens work; the two-tier topology stays a curl/CLI demo (Phase 4), not part of the UI. |
+| **D2** | SecurityAccess gating needs **both** a catalog field and an OAuth2 scope | **Recorded, implemented in Phase 8** alongside the scope work — nothing to build for Phase 7. |
+| **D3** | Browser lock lifecycle | **Short TTL (10s) + JS heartbeat + best-effort `beforeunload` release.** Not the CLI's 60s default — different failure mode (a closed tab has no RAII destructor). |
+
+Full reasoning for each: **OPEN DECISIONS** section below.
+
+### Known-good deviations from the original plan (already settled, don't revisit)
+- Phase 4 proxying is a **Router-level HTTP forwarding table**, not a vtable
+  adapter — the vtable carries raw bytes, a proxy must pass through decoded
+  JSON, and `/docs` isn't reachable through the vtable at all.
+- Session manager is **object per-adapter, lifetime per-lock** — not per-lock
+  objects, and unlocked reads never escalate.
+- API versioning is a **path prefix** (`/v1/`), with `/` deliberately
+  unversioned for version discovery.
+
+---
+
 ## What this project is
 
 A modular **SOVD (Service-Oriented Vehicle Diagnostics, ASAM / ISO 17978-3)**
@@ -88,6 +127,62 @@ External tester  ──SOVD/HTTP──►  Gateway / Domain HPC
 - Async long-running operations with job polling
 - OTX runtime (especially Scenario B server-side triggering)
 - Full spec coverage of every SOVD resource class
+
+---
+
+## OPEN DECISIONS — SETTLED 2026-08-20
+
+These were **not** for an implementing agent to pick silently — each had a
+real consequence and a wrong default. All three were put to the project
+owner explicitly (not defaulted) and confirmed before any Phase 7 code.
+
+### D1. Where does the web UI point — gateway or domain server? → **domain server directly**
+Streaming through a `sovd_proxy` entity is a deliberate `501` (Phase 6:
+bidirectional stream proxying was never built, and `try_forward()`'s one-shot
+semantics would silently truncate a stream). So **Phase 7 screen 4 (live
+chart via SSE) cannot run against the gateway tier.**
+
+The options were:
+- **(a) [CHOSEN]** UI points at a domain server directly → all four screens
+  work, the two-tier topology isn't in the UI demo (it stays a curl/CLI demo,
+  already verified live in Phase 4).
+- **(b)** UI points at the gateway → screens 1–3 work, screen 4 must be
+  disabled or fall back to polling for proxied entities.
+- **(c)** Build stream proxying in `try_forward()` → a real feature, not a
+  Phase 7 item. Out of scope unless deliberately promoted.
+
+Chosen for the reason recommended: screen 4 is the "why SOVD over UDS" demo;
+degrading it to prove a topology point would be the wrong trade. Phase 7's
+demo server is therefore a **domain-tier** config (mock- or uds_doip-backed),
+not `config/gateway.yaml`.
+
+### D2. SecurityAccess gating — needs BOTH halves, not one → **recorded, deferred to Phase 8**
+Phase 2 framed this as *either* an HTTP scope concept *or* a catalog field.
+That framing is wrong: they answer different questions and both are required.
+- **Catalog field** (`requires_security_level`, sitting parallel to the
+  existing `requires_session`) = what the **ECU** demands.
+- **OAuth2 scope** (Phase 8) = whether this **client** is permitted to request
+  that level.
+
+Gate on both. Add the catalog field alongside the Phase 8 scope work, not
+before — nothing for Phase 7 to build here; this section exists so the
+one-without-the-other framing doesn't quietly recur when Phase 8 starts.
+
+### D3. Browser lock lifecycle → **10s TTL + JS heartbeat + best-effort `beforeunload`**
+`client/lock_guard.hpp`'s RAII heartbeat has **no browser equivalent**. A
+closed tab or crashed page leaves a lock held until TTL expiry, blocking every
+other tester on that entity.
+
+Chosen mechanism (owner confirmed, 10s over the 5s alternative — more
+heartbeat slack, still short enough that a crashed tab self-heals in
+single-digit seconds):
+- **`lock_ttl_seconds = 10`** when Phase 7's UI acquires a lock — not the
+  CLI's 60s default. Different failure mode, different correct value.
+- JS heartbeat calling `PUT /v1/entities/{path}/locks/{lock_id}` at roughly
+  ttl/2 (~5s), the same ratio `LockGuard`'s C++ heartbeat already uses.
+- `beforeunload` handler issuing `DELETE /locks/{lock_id}` as a best-effort
+  extra — it will not always fire (that's exactly why the TTL must stay
+  short rather than being relied on).
 
 ### Session manager ownership — resolved
 The `SessionManager` *object* is owned per-adapter-instance (one per ECU,
@@ -250,12 +345,16 @@ cmake -S . -B build -DSOVD_ADAPTER_UDS_DOIP=ON
 cmake --build build -j4
 ./build/test_uds_doip                  # 180 assertions
 ```
-`SOVD_ADAPTER_MOCK=OFF` alongside `SOVD_ADAPTER_UDS_DOIP=ON` builds the
-adapter library and its tests fine on their own, but currently breaks
-`sovd_server`/`test_core` — they call `sovd_mock_adapter_vtable()`
-unconditionally regardless of the flag. Pre-existing since Phase 0, not a
-Phase 2 regression; matches Phase 8's still-unbuilt "restricted gateway
-build (no ECU adapters linked)" item.
+`SOVD_ADAPTER_MOCK=OFF` alongside `SOVD_ADAPTER_UDS_DOIP=ON` — **fixed,
+2026-08-20 (Phase 8's B3)**: `sovd_server` and `sovd_config_loader` now
+guard every mock reference behind `SOVD_HAVE_MOCK` (defined per-target when
+`SOVD_ADAPTER_MOCK` is on, same shape as `SOVD_HAVE_UDS_DOIP`); `test_core`/
+`test_client` are conditional on `SOVD_ADAPTER_MOCK` in `CMakeLists.txt`
+(same shape `test_uds_doip` already has for `SOVD_ADAPTER_UDS_DOIP`) rather
+than gated function-by-function. `sovd_server` builds and runs clean in this
+combination with zero mock symbols linked in; see Phase 8's B3 writeup for
+the live verification and the reasoning on why the test binaries are
+conditional rather than partially compiled.
 
 Builds clean under `-Wall -Wextra -Wpedantic` with zero warnings in every
 configuration above. Keep it that way.
@@ -953,33 +1052,171 @@ first two bullets.
 rendered from `/docs`. Hardcoding DIDs in the frontend throws away the thing
 that makes SOVD better than ODX.
 
+### ⚠ BLOCKERS — server-side work that must land BEFORE any UI code
+
+These are not optional prep. Two of the four screens cannot be built without
+them. **Do these first, in this order.**
+
+- [x] **B1. Catalog `encode()` — DONE, 2026-08-20.** Typed value → bytes,
+      the inverse of `decode()` (`catalog/src/did_catalog.cpp`), mirroring
+      its three cases exactly and using only existing catalog metadata — no
+      new schema field, as scoped. Live-verified: `PUT .../door_lock_state
+      {"value":"unlocked"}` → 204, an invalid label → clean 400 with a
+      message naming the bad value, a raw/unnamed DID PUT with hex `value`
+      unaffected. Round-trip-tested (`decode(encode(x)) == x`) for float and
+      enum, the strongest single check for a codec pair. One real scope
+      note: enum items have no width field in the schema (Float has
+      `encoding.bytes`, Enum doesn't, and this item's own scope said "no new
+      schema needed") — `encode()` produces a single byte, matching every
+      enum DID actually used in this project's catalogs; documented in
+      `did_catalog.cpp` as a real limit, not silently assumed.
+      **Required updating the wire contract**, not just adding a function:
+      `PUT` to a *named* id now sends a typed JSON `value` (a number for
+      float, a string otherwise) instead of hex — the raw/unnamed-DID path
+      is untouched. This broke two existing end-to-end tests
+      (`test_core.cpp`, `test_uds_doip.cpp`) that PUT hex to a named enum
+      id; fixed to send the label, not silently left passing against stale
+      behavior. `SovdClient::put_data()` signature changed to take
+      `nlohmann::json` instead of a hex string; a new `put_typed_data()`
+      looks the id up via `/docs` first (one extra request) to decide
+      number-vs-string for callers, like the CLI's `write` command, that
+      only have an untyped string argument.
+
+- [x] **B2. CORS support in `routes.cpp` — DONE, 2026-08-20.** One
+      `set_pre_routing_handler` hook (already existed for Phase 3 telemetry
+      timing; extended rather than adding a second hook) covers every route
+      uniformly, including `handle_stream_data`'s chunked/SSE response —
+      that handler never touches CORS headers itself, they're already on
+      `res` by the time it runs. Scope, all delivered:
+      - `Access-Control-Allow-Origin` from an explicit allow-list
+        (`Router::set_cors_allowed_origins`), **never `*`** — empty (the
+        default) means no CORS headers are ever sent, so a deployment with
+        nothing configured stays same-origin-only by default, not
+        accidentally open. Wired through both paths: `cors_allowed_origins`
+        in a topology YAML's `server:` block (`config_loader.cpp`), and
+        `SOVD_CORS_ORIGINS` (comma-separated) as an opt-in env var for the
+        hardcoded zero-config demo path, matching the MQTT/mDNS opt-in
+        pattern already established.
+      - Preflight `OPTIONS` answered directly in the pre-routing hook (not
+        registered per-route) — `OPTIONS` isn't on any route, so this is
+        what makes every route covered without N registrations. Denied
+        origins still get a clean `204`, just without
+        `Access-Control-Allow-Origin` — the browser enforces the actual
+        block, matching how a non-allow-listed origin behaves on real
+        requests too.
+      - `Access-Control-Allow-Headers` explicitly includes `X-SOVD-Lock-Id`
+        and `X-SOVD-Correlation-Id`; `Access-Control-Expose-Headers` carries
+        `X-SOVD-Correlation-Id` on every real response.
+      - **SSE verified separately, as required** — not assumed covered by
+        the plain-GET fix. `test_http_cors_applies_to_sse_stream_endpoint`
+        asserts the header on the stream endpoint's actual response
+        directly, and a live curl against `.../stream` confirmed it outside
+        the test suite too.
+      - Not built: `Access-Control-Allow-Credentials` — this project has no
+        cookie/credentialed auth yet (Phase 8), so there's nothing that
+        needs it; add only alongside real auth, not speculatively now.
+
+### Inherited constraints (recorded here so they aren't rediscovered late)
+
+- [x] **Streaming through a proxy is `501`** — see **D1** above (settled:
+      domain server directly, so this doesn't bite screen 4). Constraint
+      originates in Phase 6; repeated here because nobody building the UI
+      reads Phase 6.
+- [ ] **Discover the API version, don't hardcode `/v1/`** — `/` is
+      deliberately unversioned so a client can read `api_versions` before it
+      knows which prefix to use (see the settled versioning decision). The UI
+      should hit `/` first and build its base path from the response.
+      Hardcoding `/v1/` in the frontend wastes the entire versioning
+      decision on the one surface most likely to outlive a version bump.
+- [x] **Browser lock lifecycle** — see **D3** above (settled: 10s TTL + JS
+      heartbeat + best-effort `beforeunload`). Affects screen 3.
+- [ ] **Error verbosity by role may fire in THIS phase, not Phase 8** —
+      Phase 3 correctly deferred it because nothing leaks today (every
+      `write_error()` emits a fixed generic string; the vtable returns only a
+      `sovd_result_t`). But a *technician-facing* UI is precisely the surface
+      that will want descriptive NRC text from `adapters/uds_doip/nrc_map`
+      surfaced in error messages. **The moment that text is threaded up into
+      an HTTP response, the role-based filter has to exist** — Phase 3's
+      "revisit when the response schema changes" trigger is likely to be hit
+      here. Don't thread NRC detail up without adding the filter in the same
+      change.
+
+### The UI itself
+
 - [ ] Stack: Vue 3 + Vite + Tailwind (reuse Verso patterns; don't rebuild a
       design system — value is functional, not aesthetic)
-- [ ] **Hosted separately from the vehicle**, CORS-configured API. Serving
-      static files from a safety-adjacent gateway adds attack surface and TLS
-      pain for no benefit.
+- [ ] **Hosted separately from the vehicle**, CORS-configured API (B2).
+      Serving static files from a safety-adjacent gateway adds attack surface
+      and TLS pain for no benefit.
 - [ ] Budget time for: self-signed cert warnings, mixed content, inconsistent
       browser mDNS `.local` resolution
 
 **Scope: four screens, then STOP.** (1) entity browser, (2) fault viewer
-read/clear, (3) data table read/write with typed widgets from catalog,
-(4) live chart via SSE.
+read/clear, (3) data table read/write with typed widgets from catalog
+(needs B1), (4) live chart via SSE (needs B2 verified for `EventSource`, and
+D1 settled).
 *Update orchestration and OTX UIs are where projects go to die.*
 
 ---
 
 ## Phase 8 — Hardening
 
+**Order matters here — the first item is a prerequisite for the rest.**
+
+- [x] **B3 / FIRST: fix the restricted-build breakage — DONE, 2026-08-20.**
+      `sovd_server`'s `build_topology()` and `config_loader.cpp`'s `kind:
+      mock` handling are now both `#ifdef SOVD_HAVE_MOCK`-guarded, defined
+      per-target in `CMakeLists.txt` exactly like `SOVD_HAVE_UDS_DOIP`
+      already was — same established pattern, applied symmetrically.
+      Verified live, not just linked: `-DSOVD_ADAPTER_MOCK=OFF
+      -DSOVD_ADAPTER_UDS_DOIP=ON` now builds `sovd_server` clean with zero
+      mock symbols in the binary (checked via `nm`), the zero-config demo
+      path degrades to a warning + a bare `vehicle` root instead of failing
+      to link, a topology YAML that names `kind: mock` degrades those
+      specific entities to grouping nodes with a clear per-entity warning
+      (mirroring the existing "adapter not compiled in" pattern uds_doip
+      already had), and `test_uds_doip`'s 180 assertions still pass
+      unchanged in that config.
+      **`test_core`/`test_client` are not gated function-by-function** —
+      they're made conditional on `SOVD_ADAPTER_MOCK` in `CMakeLists.txt`
+      instead (same shape `test_uds_doip` already has for
+      `SOVD_ADAPTER_UDS_DOIP`), so they simply aren't built in the
+      restricted config rather than half-compiling. Deliberate: ~50 of
+      `test_core`'s test functions exercise the mock adapter directly or
+      via its `TestServer` fixture, and gating each individually would be a
+      large, low-value mechanical diff — the HTTP-layer coverage that
+      config combination would otherwise lose already exists redundantly in
+      `test_uds_doip.cpp`, a real end-to-end test through `routes.cpp`
+      against the real (non-mock) adapter. The actual security-relevant
+      artifact (`sovd_server` compiling and running with no ECU adapter
+      dead code) is what's fixed and verified; test-binary build hygiene in
+      that exact configuration was the smaller concern.
+      Restricted gateway build itself (Phase 8's broader item, `main.cpp`
+      wired to require a config file with no ECU-facing adapters linked at
+      all) is still unbuilt — this item was specifically the linkage
+      breakage blocking it, now cleared.
 - [ ] **mTLS gateway ↔ domain servers** — internal hop must verify the
       gateway's certificate, **not** trust a forwarded external bearer token
       (otherwise a leaked token becomes lateral movement)
 - [ ] OAuth2 / token auth at the external boundary
+- [ ] **SecurityAccess (`0x27`) wiring — needs BOTH halves, see D2.** The
+      mechanism is already built and tested in isolation in Phase 2
+      (`uds_services` requestSeed/sendKey, plus the clearly-labelled
+      `derive_key_DEMO_ONLY_NOT_SECURE` stand-in). It is unwired because
+      there was nothing to gate on. Wiring it means:
+      - adding a catalog field (`requires_security_level`, parallel to the
+        existing `requires_session`) = what the ECU demands, **and**
+      - an OAuth2 scope check = whether this client may request that level.
+      One without the other is incomplete. Real key derivation stays
+      OEM-proprietary; the stand-in must remain visibly labelled.
 - [ ] **Default-deny path/method whitelist** at the gateway tier
-- [ ] Restricted gateway build (no ECU adapters linked)
 - [ ] **Resource limits as a security property** — max concurrent sessions, max
       request body, max entity-tree depth, lock TTL ceiling. Unbounded any of
       these is a DoS on a safety-adjacent interface. (`SOVD_MAX_DATA_LEN`
-      exists; the rest don't.)
+      exists; the rest don't.) Note the **lock TTL ceiling interacts with
+      D3**: a browser needs a *short* TTL, so the ceiling must not be set so
+      low that the CLI's longer sessions break, nor so high that a crashed
+      tab strands an entity.
 - [ ] Per-adapter bounded request queue → `503` rather than piling up requests
       the bus cannot service
 - [ ] Per-adapter connection pooling — DoIP routing activation is expensive,
@@ -1017,6 +1254,16 @@ read/clear, (3) data table read/write with typed widgets from catalog,
   core, the design is wrong
 - New adapters implement `adapter.h` and nothing else; leave unsupported
   function pointers NULL rather than returning stub data
+- **Any background timer must be interruptible — `condition_variable::wait_for`
+  with a stop predicate, never `std::this_thread::sleep_for`.** An
+  uninterruptible sleep cannot be woken by `stop` + `notify_all()`, so the
+  thread destroying the object blocks for up to a full interval — and that
+  thread is often an HTTP worker. This has now been hit **twice**: `LockGuard`'s
+  lock heartbeat (Phase 5) and `StreamHub`'s shared poller (Phase 6), the second
+  caught only because a test legitimately hung for a 60-second poll interval.
+  Two instances is a pattern, not a coincidence; Phase 7/8 will add more timers
+  (browser lock heartbeat, session idle-timeout, connection pooling), so treat
+  this as a rule rather than rediscovering it a third time.
 - Tests must not sleep — use the injectable clock. One narrow, documented
   exception: `session_manager`'s heartbeat/idle-timeout is a genuine
   wall-clock-driven background thread (not a lazily-checked TTL like
@@ -1029,9 +1276,18 @@ read/clear, (3) data table read/write with typed widgets from catalog,
 
 ## Recommended order
 
-**Phases 1 → 2 → 3 is the credible, finishable core.**
-Phases 4 → 6 make it architecturally serious.
-Phases 7 → 8 are polish and production posture.
+Phases 1 → 2 → 3 were the credible, finishable core — **done**.
+Phases 4 → 6 made it architecturally serious — **done**.
+Phases 7 → 8 are polish and production posture — **remaining**.
+
+**Immediate sequence from here:**
+1. ~~Settle **D1**, **D2**, **D3**~~ — **done**, see OPEN DECISIONS above
+2. ~~**B1** catalog `encode()` + validation~~ — **done**
+3. ~~**B2** CORS, with SSE verified separately via `EventSource`~~ — **done**
+4. ~~**B3** restricted-build fix~~ — **done**
+5. Phase 7 screens 1 → 2 → 3 → 4, in that order (1 and 2 need no blockers, so
+   they can start as soon as B2 lands)
+6. Phase 8, restricted build first
 
 For interviews, Phases 1, 3, and 6 show understanding of *why* SOVD exists
 rather than just an ability to serve JSON over HTTP. Self-description and

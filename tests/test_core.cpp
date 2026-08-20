@@ -403,6 +403,113 @@ void test_catalog_decode_float_wrong_length_throws() {
     ASSERT_TRUE(threw);
 }
 
+// ---------------------------------------------------------------------
+// B1 (Phase 7 blocker): Catalog::encode() -- the inverse of decode(), and
+// round-trip tests are the strongest single check for a codec pair: decode
+// then encode (or vice versa) should be the identity, so a bug in either
+// direction shows up without hand-computing every expected byte string.
+
+void test_catalog_encode_float_matches_worked_example() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *v = cat.find_by_id("battery_voltage");
+    auto bytes = Catalog::encode(*v, 13.0);
+    ASSERT_EQ(bytes.size(), static_cast<size_t>(2));
+    ASSERT_EQ(bytes[0], static_cast<uint8_t>(0x32));
+    ASSERT_EQ(bytes[1], static_cast<uint8_t>(0xC8));
+
+    // Round trip: decode(encode(x)) == x.
+    auto decoded = Catalog::decode(*v, bytes);
+    ASSERT_TRUE(std::abs(std::get<double>(decoded) - 13.0) < 1e-9);
+}
+
+void test_catalog_encode_float_out_of_range_throws() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *v = cat.find_by_id("battery_voltage"); // 2 bytes, scale 0.001 -> max ~65.535
+    bool threw = false;
+    try {
+        Catalog::encode(*v, 100000.0);
+    } catch (const CatalogError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+
+    threw = false;
+    try {
+        Catalog::encode(*v, -1.0); // encoding is unsigned, matching decode()'s own always-unsigned reading
+    } catch (const CatalogError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+void test_catalog_encode_float_wrong_variant_throws() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *v = cat.find_by_id("battery_voltage");
+    bool threw = false;
+    try {
+        Catalog::encode(*v, std::string("13.0")); // wrong alternative -- must be the double variant
+    } catch (const CatalogError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+void test_catalog_encode_enum_known_label_and_unknown_label_throws() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *d = cat.find_by_id("door_lock_state");
+
+    auto bytes = Catalog::encode(*d, std::string("locked"));
+    ASSERT_EQ(bytes.size(), static_cast<size_t>(1));
+    ASSERT_EQ(bytes[0], static_cast<uint8_t>(0x01));
+
+    // Round trip.
+    auto decoded = Catalog::decode(*d, bytes);
+    ASSERT_EQ(std::get<std::string>(decoded), "locked");
+
+    // No raw-number fallback on write, unlike decode()'s read-side leniency
+    // for an undocumented value -- an unknown label must be rejected before
+    // it reaches the adapter, not silently sent as garbage.
+    bool threw = false;
+    try {
+        Catalog::encode(*d, std::string("not_a_real_state"));
+    } catch (const CatalogError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+void test_catalog_encode_string_and_raw() {
+    Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
+    const DataItem *vin = cat.find_by_id("vin"); // length: 17
+    auto bytes = Catalog::encode(*vin, std::string("ABC"));
+    ASSERT_EQ(bytes.size(), static_cast<size_t>(3));
+    ASSERT_EQ(bytes[0], static_cast<uint8_t>('A'));
+
+    bool threw = false;
+    try {
+        Catalog::encode(*vin, std::string("THIS_STRING_IS_DEFINITELY_LONGER_THAN_17_CHARS"));
+    } catch (const CatalogError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+
+    DataItem raw_item;
+    raw_item.id = "unknown_item";
+    raw_item.type = DataType::Raw;
+    auto raw_bytes = Catalog::encode(raw_item, std::string("DEAD"));
+    ASSERT_EQ(raw_bytes.size(), static_cast<size_t>(2));
+    ASSERT_EQ(raw_bytes[0], static_cast<uint8_t>(0xDE));
+    ASSERT_EQ(raw_bytes[1], static_cast<uint8_t>(0xAD));
+
+    bool raw_threw = false;
+    try {
+        Catalog::encode(raw_item, std::string("not-hex"));
+    } catch (const CatalogError &) {
+        raw_threw = true;
+    }
+    ASSERT_TRUE(raw_threw);
+}
+
 void test_catalog_rejects_missing_required_field() {
     bool threw = false;
     try {
@@ -883,16 +990,31 @@ void test_http_named_data_path_put_readonly_guard_and_write() {
     ASSERT_TRUE(readonly != nullptr);
     ASSERT_EQ(readonly->status, 400);
 
-    // door_lock_state is read_write -> named write succeeds, and a
-    // subsequent named read observes it (raw hex wire format, per the
-    // catalog's still-hex-only PUT contract).
-    auto write = cli.Put("/v1/entities/vehicle/body/bcm/data/door_lock_state", headers, R"({"value":"02"})",
+    // door_lock_state is read_write -> named write succeeds. B1: the wire
+    // value is now typed (the enum label) for a named id, not hex -- same
+    // symmetry the named GET path already had.
+    auto write = cli.Put("/v1/entities/vehicle/body/bcm/data/door_lock_state", headers, R"({"value":"deadlocked"})",
                           "application/json");
     ASSERT_TRUE(write != nullptr);
     ASSERT_EQ(write->status, 204);
 
     auto after = cli.Get("/v1/entities/vehicle/body/bcm/data/door_lock_state");
     ASSERT_EQ(json::parse(after->body)["value"].get<std::string>(), "deadlocked");
+
+    // An unknown enum label is rejected with 400 before it ever reaches the
+    // adapter -- Catalog::encode()'s validation, not the adapter's problem.
+    auto bad_label = cli.Put("/v1/entities/vehicle/body/bcm/data/door_lock_state", headers,
+                              R"({"value":"not_a_real_state"})", "application/json");
+    ASSERT_TRUE(bad_label != nullptr);
+    ASSERT_EQ(bad_label->status, 400);
+
+    // Raw-DID writes (no catalog entry) are untouched -- still hex over the wire.
+    auto raw_write =
+        cli.Put("/v1/entities/vehicle/body/bcm/data/0200", headers, R"({"value":"01"})", "application/json");
+    ASSERT_TRUE(raw_write != nullptr);
+    ASSERT_EQ(raw_write->status, 204);
+    auto after_raw = cli.Get("/v1/entities/vehicle/body/bcm/data/door_lock_state");
+    ASSERT_EQ(json::parse(after_raw->body)["value"].get<std::string>(), "locked");
 }
 
 void test_http_telemetry_sink_separate_from_event_sink() {
@@ -930,6 +1052,90 @@ void test_http_telemetry_sink_separate_from_event_sink() {
     ASSERT_EQ(evt["path"].get<std::string>(), "/v1/entities");
     ASSERT_EQ(evt["status"].get<int>(), 200);
     ASSERT_TRUE(evt["duration_ms"].get<double>() >= 0.0);
+}
+
+// ---------------------------------------------------------------------
+// B2 (Phase 7 blocker): CORS. No allow-list configured by default (TestServer
+// doesn't call set_cors_allowed_origins), matching "empty means every
+// browser origin denied by the browser's own policy" -- each test here
+// configures its own list explicitly.
+
+void test_http_cors_no_header_without_allowlist() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+    // No set_cors_allowed_origins() call -- default is deny-all.
+    auto res = cli.Get("/v1/entities", httplib::Headers{{"Origin", "http://localhost:5173"}});
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_FALSE(res->has_header("Access-Control-Allow-Origin"));
+}
+
+void test_http_cors_allowed_origin_gets_headers() {
+    TestServer ts;
+    ts.router.set_cors_allowed_origins({"http://localhost:5173"});
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto allowed = cli.Get("/v1/entities", httplib::Headers{{"Origin", "http://localhost:5173"}});
+    ASSERT_TRUE(allowed != nullptr);
+    ASSERT_EQ(allowed->get_header_value("Access-Control-Allow-Origin"), "http://localhost:5173");
+    ASSERT_EQ(allowed->get_header_value("Access-Control-Expose-Headers"), "X-SOVD-Correlation-Id");
+
+    // A different, non-allow-listed origin gets nothing -- the allow-list
+    // is exact-match, not a wildcard subdomain/scheme match.
+    auto denied = cli.Get("/v1/entities", httplib::Headers{{"Origin", "http://evil.example"}});
+    ASSERT_TRUE(denied != nullptr);
+    ASSERT_FALSE(denied->has_header("Access-Control-Allow-Origin"));
+}
+
+void test_http_cors_preflight_options() {
+    TestServer ts;
+    ts.router.set_cors_allowed_origins({"http://localhost:5173"});
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto preflight = cli.Options("/v1/entities/vehicle/body/bcm/data/battery_voltage",
+                                  httplib::Headers{{"Origin", "http://localhost:5173"},
+                                                    {"Access-Control-Request-Method", "PUT"}});
+    ASSERT_TRUE(preflight != nullptr);
+    ASSERT_EQ(preflight->status, 204);
+    ASSERT_EQ(preflight->get_header_value("Access-Control-Allow-Origin"), "http://localhost:5173");
+    // X-SOVD-Lock-Id/X-SOVD-Correlation-Id explicitly present: a preflight
+    // that only allows Content-Type silently breaks every lock-gated write
+    // and every correlated request from the browser.
+    std::string allow_headers = preflight->get_header_value("Access-Control-Allow-Headers");
+    ASSERT_TRUE(allow_headers.find("X-SOVD-Lock-Id") != std::string::npos);
+    ASSERT_TRUE(allow_headers.find("X-SOVD-Correlation-Id") != std::string::npos);
+
+    // A preflight from a non-allow-listed origin still gets a response (not
+    // a 404/500), just without the header that would let the browser
+    // proceed -- the browser enforces the actual block.
+    auto denied_preflight = cli.Options("/v1/entities/vehicle/body/bcm/data/battery_voltage",
+                                         httplib::Headers{{"Origin", "http://evil.example"},
+                                                           {"Access-Control-Request-Method", "GET"}});
+    ASSERT_TRUE(denied_preflight != nullptr);
+    ASSERT_EQ(denied_preflight->status, 204);
+    ASSERT_FALSE(denied_preflight->has_header("Access-Control-Allow-Origin"));
+}
+
+void test_http_cors_applies_to_sse_stream_endpoint() {
+    // The doc's own instruction: don't assume the plain-GET CORS fix covers
+    // EventSource's transport -- test the stream endpoint's actual response
+    // headers directly, since handle_stream_data builds its response via
+    // set_chunked_content_provider, a different code path from every other
+    // handler's res.set_content().
+    TestServer ts;
+    ts.router.set_cors_allowed_origins({"http://localhost:5173"});
+    httplib::Client cli("127.0.0.1", ts.port);
+    cli.set_read_timeout(2, 0);
+
+    bool got_header = false;
+    cli.Get(
+        "/v1/entities/vehicle/body/bcm/data/battery_voltage/stream?interval_ms=100",
+        httplib::Headers{{"Origin", "http://localhost:5173"}},
+        [&](const httplib::Response &res) {
+            got_header = res.get_header_value("Access-Control-Allow-Origin") == "http://localhost:5173";
+            return true;
+        },
+        [&](const char *, size_t) { return false; }); // stop right after headers + first chunk
+    ASSERT_TRUE(got_header);
 }
 
 // Pure MQTT packet framing -- no socket, no broker. Matches the
@@ -1362,6 +1568,11 @@ int main() {
     RUN_TEST(test_catalog_decode_enum_known_and_unknown);
     RUN_TEST(test_catalog_decode_string_and_raw);
     RUN_TEST(test_catalog_decode_float_wrong_length_throws);
+    RUN_TEST(test_catalog_encode_float_matches_worked_example);
+    RUN_TEST(test_catalog_encode_float_out_of_range_throws);
+    RUN_TEST(test_catalog_encode_float_wrong_variant_throws);
+    RUN_TEST(test_catalog_encode_enum_known_label_and_unknown_label_throws);
+    RUN_TEST(test_catalog_encode_string_and_raw);
     RUN_TEST(test_catalog_rejects_missing_required_field);
     RUN_TEST(test_catalog_rejects_float_without_encoding);
     RUN_TEST(test_catalog_rejects_invalid_hex_did);
@@ -1390,6 +1601,11 @@ int main() {
     RUN_TEST(test_http_batch_data_read_501_on_no_backend);
     RUN_TEST(test_http_named_data_path_put_readonly_guard_and_write);
     RUN_TEST(test_http_telemetry_sink_separate_from_event_sink);
+
+    RUN_TEST(test_http_cors_no_header_without_allowlist);
+    RUN_TEST(test_http_cors_allowed_origin_gets_headers);
+    RUN_TEST(test_http_cors_preflight_options);
+    RUN_TEST(test_http_cors_applies_to_sse_stream_endpoint);
 
     RUN_TEST(test_mqtt_encode_connect_packet);
     RUN_TEST(test_mqtt_encode_publish_packet);

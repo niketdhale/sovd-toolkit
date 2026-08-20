@@ -5,12 +5,15 @@
 #include <sstream>
 
 #include "json.hpp"
-#include "mock_adapter.h"
 #include "sovd/catalog/did_catalog.hpp"
 #include "yaml-cpp/yaml.h"
 
 #ifdef SOVD_HAVE_UDS_DOIP
 #include "sovd/uds_doip/uds_doip_adapter.h"
+#endif
+
+#ifdef SOVD_HAVE_MOCK
+#include "mock_adapter.h"
 #endif
 
 namespace sovd::server {
@@ -93,9 +96,15 @@ void attach_entity(const std::string &path, EntityType type, const YAML::Node &e
     std::string kind = adapter["kind"] ? adapter["kind"].as<std::string>() : "";
 
     if (kind == "mock") {
+#ifdef SOVD_HAVE_MOCK
         const sovd_vtable_t *vt = sovd_mock_adapter_vtable();
         add_entity_or_throw(registry, path, type, vt, vt->create(nullptr));
         attach_router_catalog_if_present(path, adapter, router);
+#else
+        std::cerr << "warning: entity " << path << " requests adapter kind 'mock', but this binary was built "
+                  << "without SOVD_ADAPTER_MOCK; registering as a grouping node" << std::endl;
+        add_entity_or_throw(registry, path, type);
+#endif
         return;
     }
 
@@ -161,6 +170,16 @@ ServerConfig load_topology_from_string(const std::string &yaml_text, EntityRegis
     cfg.id = server_node["id"].as<std::string>();
     cfg.port = server_node["port"].as<int>();
     cfg.role = server_node["role"].as<std::string>();
+
+    // B2 (Phase 7 blocker): optional, and deliberately an explicit
+    // allow-list rather than a bare "cors: true" -- absent means CORS stays
+    // off (every browser origin denied by the browser's own policy), never
+    // a wildcard default on a safety-adjacent diagnostic interface.
+    if (server_node["cors_allowed_origins"] && server_node["cors_allowed_origins"].IsSequence()) {
+        std::vector<std::string> origins;
+        for (const auto &o : server_node["cors_allowed_origins"]) origins.push_back(o.as<std::string>());
+        router.set_cors_allowed_origins(std::move(origins));
+    }
 
     if (!root["entities"] || !root["entities"].IsSequence()) {
         throw ConfigError("missing required top-level key: entities (must be a sequence)");

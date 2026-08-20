@@ -122,8 +122,25 @@ public:
 
     DataValue get_data(const std::string &path, const std::string &id);
     std::vector<DataValue> get_data_batch(const std::string &path, const std::vector<std::string> &ids);
-    void put_data(const std::string &path, const std::string &id, const std::string &hex_value,
+
+    // B1 (Phase 7 blocker): `value` is a JSON *value*, not always hex text
+    // -- the server now expects a typed value (a JSON number for a float
+    // catalog item, a JSON string label/text otherwise) for a named id, and
+    // still expects a hex string for a raw/unnamed DID. Callers that know
+    // which they're targeting can just pass the right JSON type directly;
+    // put_typed_data() below is the discovery-driven helper for callers
+    // (like the CLI) that only have a string argument and need to look up
+    // the type first.
+    void put_data(const std::string &path, const std::string &id, const nlohmann::json &value,
                   const std::string &lock_id);
+
+    // Looks up `id` via get_docs() to decide whether raw_value should be
+    // sent as a JSON number (a float catalog item) or a JSON string
+    // (everything else, including an unnamed/raw DID, which get_docs()
+    // simply won't have an entry for). One extra request per call -- fine
+    // for an interactive/scripted CLI, not meant for a hot path.
+    void put_typed_data(const std::string &path, const std::string &id, const std::string &raw_value,
+                         const std::string &lock_id);
 
     void set_mode(const std::string &path, const std::string &mode, const std::string &lock_id);
     nlohmann::json execute_operation(const std::string &path, const std::string &op, const std::string &params_json,

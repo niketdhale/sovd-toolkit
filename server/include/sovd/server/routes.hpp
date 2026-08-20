@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "sovd/catalog/did_catalog.hpp"
 #include "sovd/entity_registry.hpp"
@@ -75,6 +76,13 @@ public:
     // ProxyTarget's comment for why this bypasses the vtable entirely.
     void attach_proxy(const std::string &entity_path, ProxyTarget target);
 
+    // B2 (Phase 7 blocker): an explicit allow-list, never "*" -- this is a
+    // diagnostic interface on a safety-adjacent device. Empty (the default)
+    // means no CORS headers are ever sent, i.e. every browser origin is
+    // denied by the browser's own same-origin policy; CORS is opt-in
+    // per-deployment, not on by default.
+    void set_cors_allowed_origins(std::vector<std::string> origins);
+
 private:
     void handle_root(const httplib::Request &req, httplib::Response &res);
     void handle_list_entities(const httplib::Request &req, httplib::Response &res);
@@ -124,6 +132,13 @@ private:
     // instead, which timestamps alone can't guarantee (CLAUDE.md).
     std::string correlation_id_for(const httplib::Request &req, httplib::Response &res) const;
 
+    // B2: if req's Origin header is in the allow-list, stamps
+    // Access-Control-Allow-Origin (+ Access-Control-Expose-Headers for
+    // X-SOVD-Correlation-Id) on res. A no-op (res untouched) for a missing
+    // or non-allow-listed Origin -- the browser's own same-origin policy is
+    // what actually blocks the response in that case, not this method.
+    void apply_cors_headers(const httplib::Request &req, httplib::Response &res) const;
+
     EntityRegistry &registry_;
     LockManager &locks_;
     std::string server_id_;
@@ -133,6 +148,7 @@ private:
     EventSink event_sink_;
     EventSink telemetry_sink_;
     StreamHub stream_hub_;
+    std::vector<std::string> cors_allowed_origins_;
 };
 
 } // namespace sovd::server

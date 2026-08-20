@@ -2,9 +2,10 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
+#include <vector>
 
 #include "httplib.h"
-#include "mock_adapter.h"
 #include "sovd/catalog/did_catalog.hpp"
 #include "sovd/entity_registry.hpp"
 #include "sovd/lock_manager.hpp"
@@ -16,6 +17,10 @@
 #include "sovd/server/mdns_advertise.hpp"
 #endif
 
+#ifdef SOVD_HAVE_MOCK
+#include "mock_adapter.h"
+#endif
+
 using namespace sovd;
 
 namespace {
@@ -23,6 +28,14 @@ namespace {
 // Hardcoded zero-config demo topology, used when argv[1] isn't a config
 // file (see main()). Phase 4 adds the YAML-driven path alongside this, not
 // instead of it -- `./sovd_server` with no args still needs to just work.
+//
+// B3: only compiled against the mock adapter when it's actually linked in
+// (SOVD_HAVE_MOCK) -- a restricted build with SOVD_ADAPTER_MOCK=OFF has no
+// mock symbols to call. That build has no zero-config demo to offer either
+// way: an operator building a mock-less binary is building it to run real
+// hardware, which needs a topology YAML (config/, `kind: uds_doip`)
+// regardless of whether main.cpp *could* fall back to something else.
+#ifdef SOVD_HAVE_MOCK
 void build_topology(EntityRegistry &registry) {
     const sovd_vtable_t *mock = sovd_mock_adapter_vtable();
 
@@ -36,6 +49,15 @@ void build_topology(EntityRegistry &registry) {
     registry.add_entity("vehicle/body/bcm", EntityType::Component, mock, mock->create(nullptr));
     registry.add_entity("vehicle/body/door_ctrl", EntityType::Component, mock, mock->create(nullptr));
 }
+#else
+void build_topology(EntityRegistry &registry) {
+    registry.add_entity("vehicle", EntityType::Vehicle);
+    std::cerr << "warning: this binary was built without the mock adapter (SOVD_ADAPTER_MOCK=OFF); "
+              << "the zero-config demo topology has nothing to attach. Pass a topology YAML instead "
+              << "(see config/), e.g. `./sovd_server config/domain_body.yaml` with `kind: uds_doip`."
+              << std::endl;
+}
+#endif
 
 } // namespace
 
@@ -113,6 +135,21 @@ int main(int argc, char **argv) {
         router.set_event_sink([events_pub](const std::string &line) { events_pub->publish(line); });
         router.set_telemetry_sink([telemetry_pub](const std::string &line) { telemetry_pub->publish(line); });
         std::cout << "MQTT event/telemetry publishing to " << mqtt_host << ":" << mqtt_port << std::endl;
+    }
+
+    // B2: CORS in the hardcoded-demo path is the same opt-in-via-env-var
+    // shape as MQTT/mDNS -- unset means no CORS headers at all (browser
+    // origins denied by same-origin policy), so `./sovd_server` still runs
+    // exactly as before with no config file. Comma-separated origins, e.g.
+    // SOVD_CORS_ORIGINS="http://localhost:5173,https://tester.example".
+    if (const char *cors_origins = std::getenv("SOVD_CORS_ORIGINS")) {
+        std::vector<std::string> origins;
+        std::istringstream iss(cors_origins);
+        for (std::string origin; std::getline(iss, origin, ','); ) {
+            if (!origin.empty()) origins.push_back(origin);
+        }
+        router.set_cors_allowed_origins(origins);
+        std::cout << "CORS allowed for " << origins.size() << " origin(s)" << std::endl;
     }
 
     // mDNS advertising is opt-in the same way MQTT is -- unset means no

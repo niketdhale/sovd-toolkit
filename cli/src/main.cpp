@@ -162,7 +162,11 @@ int main(int argc, char **argv) {
         if (command == "write") {
             if (argc < 6) return usage();
             LockGuard lock(cli, argv[3], 60, /*heartbeat=*/false);
-            cli.put_data(argv[3], argv[4], argv[5], lock.lock_id());
+            // B1: named ids take a typed value now (a number for a float
+            // item), not always hex -- put_typed_data looks the id up via
+            // /docs first to send the right JSON type. A raw/unnamed DID
+            // has no /docs entry and keeps taking hex, same as before.
+            cli.put_typed_data(argv[3], argv[4], argv[5], lock.lock_id());
             std::cout << "written\n";
             return 0;
         }

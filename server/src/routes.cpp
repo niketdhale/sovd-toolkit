@@ -166,6 +166,21 @@ Router::Router(EntityRegistry &registry, LockManager &locks, std::string server_
 
 void Router::set_event_sink(EventSink sink) { event_sink_ = std::move(sink); }
 void Router::set_telemetry_sink(EventSink sink) { telemetry_sink_ = std::move(sink); }
+void Router::set_cors_allowed_origins(std::vector<std::string> origins) { cors_allowed_origins_ = std::move(origins); }
+
+void Router::apply_cors_headers(const httplib::Request &req, httplib::Response &res) const {
+    std::string origin = req.get_header_value("Origin");
+    if (origin.empty()) return;
+    for (auto &allowed : cors_allowed_origins_) {
+        if (allowed == origin) {
+            res.set_header("Access-Control-Allow-Origin", origin);
+            res.set_header("Access-Control-Expose-Headers", "X-SOVD-Correlation-Id");
+            return;
+        }
+    }
+    // Not on the allow-list: no header at all, never "*" -- the browser
+    // enforces the actual block, this just declines to open the door.
+}
 void Router::set_server_id(std::string id) { server_id_ = std::move(id); }
 void Router::set_role(std::string role) { role_ = std::move(role); }
 
@@ -187,8 +202,34 @@ void Router::register_routes(httplib::Server &svr) {
     // into the security event stream (CLAUDE.md: "an IDS should not be your
     // APM"). One hook pair here covers every route without instrumenting
     // each handler individually.
-    svr.set_pre_routing_handler([](const httplib::Request &, httplib::Response &) {
+    //
+    // B2 (Phase 7 blocker): CORS lives in the same pre-routing hook for the
+    // same reason -- one place that runs before every route (including
+    // handle_stream_data's chunked/SSE response, which never touches CORS
+    // headers itself) beats threading Access-Control-* into every handler.
+    // OPTIONS preflight requests aren't registered on any route, so they're
+    // answered directly here and marked Handled rather than falling through
+    // to a 404.
+    svr.set_pre_routing_handler([this](const httplib::Request &req, httplib::Response &res) {
         request_start() = std::chrono::steady_clock::now();
+
+        if (req.method == "OPTIONS") {
+            apply_cors_headers(req, res);
+            if (res.has_header("Access-Control-Allow-Origin")) {
+                res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+                // X-SOVD-Lock-Id/X-SOVD-Correlation-Id explicitly listed: a
+                // preflight that only allows Content-Type silently breaks
+                // every lock-gated write and every correlated request from
+                // the browser, since those headers wouldn't pass preflight.
+                res.set_header("Access-Control-Allow-Headers",
+                                "Content-Type, X-SOVD-Lock-Id, X-SOVD-Correlation-Id");
+                res.set_header("Access-Control-Max-Age", "600");
+            }
+            res.status = 204;
+            return httplib::Server::HandlerResponse::Handled;
+        }
+
+        apply_cors_headers(req, res);
         return httplib::Server::HandlerResponse::Unhandled;
     });
     svr.set_logger([this](const httplib::Request &req, const httplib::Response &res) {
@@ -558,9 +599,6 @@ void Router::handle_put_data(const httplib::Request &req, httplib::Response &res
         return;
     }
 
-    // The catalog resolves named ids -> DIDs above; it doesn't yet encode
-    // typed values -> bytes (no caller needed that before this), so the
-    // wire format stays hex bytes regardless of whether the path was named.
     json parsed;
     try {
         parsed = json::parse(req.body);
@@ -568,15 +606,48 @@ void Router::handle_put_data(const httplib::Request &req, httplib::Response &res
         write_error(res, 400, "BAD_REQUEST", "invalid JSON body");
         return;
     }
-    if (!parsed.contains("value") || !parsed["value"].is_string()) {
-        write_error(res, 400, "BAD_REQUEST", R"(expected {"value": "<hex>"})");
+    if (!parsed.contains("value")) {
+        write_error(res, 400, "BAD_REQUEST", R"(expected {"value": ...})");
         return;
     }
 
+    // B1 (Phase 7 blocker): a named catalog id gets a typed value on the
+    // wire (a JSON string label for enum/string/raw, a JSON number for
+    // float) and goes through Catalog::encode() -- symmetric with how a
+    // named GET already returns a typed, decoded value instead of raw hex.
+    // An unnamed/raw DID has no catalog entry to type-check against, so it
+    // keeps the original hex-bytes-over-the-wire contract unchanged.
     std::vector<uint8_t> bytes;
-    if (!from_hex(parsed["value"].get<std::string>(), bytes)) {
-        write_error(res, 400, "BAD_REQUEST", "value must be hex-encoded bytes");
-        return;
+    if (item) {
+        try {
+            std::variant<std::string, double> typed_value;
+            if (item->type == catalog::DataType::Float) {
+                if (!parsed["value"].is_number()) {
+                    write_error(res, 400, "BAD_REQUEST", "value must be a number for this data item");
+                    return;
+                }
+                typed_value = parsed["value"].get<double>();
+            } else {
+                if (!parsed["value"].is_string()) {
+                    write_error(res, 400, "BAD_REQUEST", "value must be a string for this data item");
+                    return;
+                }
+                typed_value = parsed["value"].get<std::string>();
+            }
+            bytes = catalog::Catalog::encode(*item, typed_value);
+        } catch (const catalog::CatalogError &ex) {
+            write_error(res, 400, "BAD_REQUEST", ex.what());
+            return;
+        }
+    } else {
+        if (!parsed["value"].is_string()) {
+            write_error(res, 400, "BAD_REQUEST", R"(expected {"value": "<hex>"})");
+            return;
+        }
+        if (!from_hex(parsed["value"].get<std::string>(), bytes)) {
+            write_error(res, 400, "BAD_REQUEST", "value must be hex-encoded bytes");
+            return;
+        }
     }
 
     sovd_result_t r =

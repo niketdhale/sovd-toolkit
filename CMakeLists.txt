@@ -106,10 +106,16 @@ target_link_libraries(sovd_config_loader PUBLIC sovd_server_lib sovd_catalog ${S
 if(SOVD_ADAPTER_UDS_DOIP)
     target_compile_definitions(sovd_config_loader PRIVATE SOVD_HAVE_UDS_DOIP=1)
 endif()
+if(SOVD_ADAPTER_MOCK)
+    target_compile_definitions(sovd_config_loader PRIVATE SOVD_HAVE_MOCK=1)
+endif()
 
 add_executable(sovd_server server/src/main.cpp)
 target_include_directories(sovd_server PRIVATE adapters/mock)
 target_link_libraries(sovd_server PRIVATE sovd_server_lib sovd_config_loader ${SOVD_ADAPTER_LIBS})
+if(SOVD_ADAPTER_MOCK)
+    target_compile_definitions(sovd_server PRIVATE SOVD_HAVE_MOCK=1)
+endif()
 
 # --- client SDK (Phase 5): typed wrappers, RAII locks, retry/backoff ---
 add_library(sovd_client STATIC
@@ -144,11 +150,26 @@ endif()
 
 # --- tests ---
 enable_testing()
-add_executable(test_core tests/test_core.cpp)
-target_include_directories(test_core PRIVATE tests adapters/mock)
-target_link_libraries(test_core PRIVATE sovd_server_lib sovd_config_loader sovd_catalog ${SOVD_ADAPTER_LIBS} Threads::Threads)
-target_compile_definitions(test_core PRIVATE SOVD_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-add_test(NAME test_core COMMAND test_core)
+
+# B3 (Phase 8's restricted-build fix, done here to keep the build matrix
+# honest while Phase 7 proceeds): test_core is built only when
+# SOVD_ADAPTER_MOCK is ON, same conditional shape as test_uds_doip below.
+# It's not gated function-by-function (~50 of its tests exercise the mock
+# adapter directly or via TestServer) because that HTTP-layer coverage
+# already exists redundantly, against the real adapter, in test_uds_doip.cpp
+# -- a real end-to-end test through routes.cpp with no mock involved. Making
+# test_core itself conditional (rather than half-compiling it) is the
+# smaller, honest fix for the actual security-relevant artifact
+# (SOVD_ADAPTER_MOCK=OFF -DSOVD_ADAPTER_UDS_DOIP=ON `sovd_server`, guarded
+# above via SOVD_HAVE_MOCK) without a large, low-value mechanical diff
+# gating every mock-dependent test function individually.
+if(SOVD_ADAPTER_MOCK)
+    add_executable(test_core tests/test_core.cpp)
+    target_include_directories(test_core PRIVATE tests adapters/mock)
+    target_link_libraries(test_core PRIVATE sovd_server_lib sovd_config_loader sovd_catalog ${SOVD_ADAPTER_LIBS} Threads::Threads)
+    target_compile_definitions(test_core PRIVATE SOVD_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    add_test(NAME test_core COMMAND test_core)
+endif()
 
 # Live socket tests for adapters/uds_doip, built only alongside the adapter
 # itself — the default (mock-only) build stays hermetic with no socket I/O.
@@ -162,7 +183,11 @@ endif()
 
 # Client SDK tests: real SovdClient against a real live sovd_server (mock
 # topology), same "test the real path" standard as the rest of this repo.
-add_executable(test_client tests/test_client.cpp)
-target_include_directories(test_client PRIVATE tests adapters/mock)
-target_link_libraries(test_client PRIVATE sovd_client sovd_server_lib sovd_catalog ${SOVD_ADAPTER_LIBS} Threads::Threads)
-add_test(NAME test_client COMMAND test_client)
+# Conditional on SOVD_ADAPTER_MOCK for the same reason test_core is above --
+# its LiveServer fixture is mock-backed.
+if(SOVD_ADAPTER_MOCK)
+    add_executable(test_client tests/test_client.cpp)
+    target_include_directories(test_client PRIVATE tests adapters/mock)
+    target_link_libraries(test_client PRIVATE sovd_client sovd_server_lib sovd_catalog ${SOVD_ADAPTER_LIBS} Threads::Threads)
+    add_test(NAME test_client COMMAND test_client)
+endif()

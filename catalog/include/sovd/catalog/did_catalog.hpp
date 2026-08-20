@@ -80,6 +80,22 @@ public:
     // Float item).
     static std::variant<std::string, double> decode(const DataItem &item, const std::vector<uint8_t> &bytes);
 
+    // B1 (Phase 7 blocker): the inverse of decode() — a human-facing typed
+    // value in, wire bytes out. Takes the same variant shape decode()
+    // returns, for the same reason decode() returns it: String/Enum/Raw are
+    // std::string (Enum = the label, Raw = uppercase hex, matching decode()
+    // exactly), Float is double (the already-scaled human value, e.g.
+    // 13.0 for a battery_voltage write). Throws CatalogError — mapped to
+    // HTTP 400 by the caller, never reaching the adapter — for: the wrong
+    // variant alternative for item.type, an enum label not present in
+    // item.values (no raw-number fallback on write, unlike decode()'s
+    // read-side fallback: silently accepting an undocumented value on
+    // write is a real correctness hazard decode()'s read-side leniency
+    // isn't), a scaled float value that doesn't fit in encoding.bytes, a
+    // string longer than item.length (when length > 0), or invalid hex for
+    // a Raw item.
+    static std::vector<uint8_t> encode(const DataItem &item, const std::variant<std::string, double> &value);
+
 private:
     std::vector<DataItem> data_;
     std::vector<Operation> operations_;

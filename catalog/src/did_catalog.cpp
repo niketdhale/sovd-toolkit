@@ -1,5 +1,8 @@
 #include "sovd/catalog/did_catalog.hpp"
 
+#include <cmath>
+#include <cstdint>
+
 #include <yaml-cpp/yaml.h>
 
 namespace sovd::catalog {
@@ -260,6 +263,44 @@ std::string to_hex(const std::vector<uint8_t> &bytes) {
     return out;
 }
 
+std::vector<uint8_t> uint_to_bytes(uint64_t value, int nbytes, bool big_endian) {
+    std::vector<uint8_t> out(static_cast<size_t>(nbytes));
+    for (int i = 0; i < nbytes; ++i) {
+        int shift = big_endian ? (nbytes - 1 - i) * 8 : i * 8;
+        out[static_cast<size_t>(i)] = static_cast<uint8_t>((value >> shift) & 0xFF);
+    }
+    return out;
+}
+
+// Mirrors routes.cpp's from_hex (server/ can't be depended on from catalog/
+// per the layering rule, so this is a small deliberate duplication rather
+// than a cross-module reach) but throws instead of returning bool, matching
+// every other validation failure in this file.
+std::vector<uint8_t> from_hex(const std::string &item_id, const std::string &s_in) {
+    std::string s = s_in;
+    if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s = s.substr(2);
+    if (s.empty() || s.size() % 2 != 0) {
+        throw CatalogError("data item '" + item_id + "': value must be hex-encoded bytes");
+    }
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::vector<uint8_t> out;
+    out.reserve(s.size() / 2);
+    for (size_t i = 0; i < s.size(); i += 2) {
+        int hi = nibble(s[i]);
+        int lo = nibble(s[i + 1]);
+        if (hi < 0 || lo < 0) {
+            throw CatalogError("data item '" + item_id + "': value must be hex-encoded bytes");
+        }
+        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    return out;
+}
+
 } // namespace
 
 std::variant<std::string, double> Catalog::decode(const DataItem &item, const std::vector<uint8_t> &bytes) {
@@ -289,6 +330,67 @@ std::variant<std::string, double> Catalog::decode(const DataItem &item, const st
             return to_hex(bytes);
     }
     return to_hex(bytes);
+}
+
+std::vector<uint8_t> Catalog::encode(const DataItem &item, const std::variant<std::string, double> &value) {
+    switch (item.type) {
+        case DataType::String: {
+            if (!std::holds_alternative<std::string>(value)) {
+                throw CatalogError("data item '" + item.id + "': expected a string value");
+            }
+            const std::string &s = std::get<std::string>(value);
+            if (item.length > 0 && static_cast<int>(s.size()) > item.length) {
+                throw CatalogError("data item '" + item.id + "': value exceeds max length " +
+                                    std::to_string(item.length));
+            }
+            return std::vector<uint8_t>(s.begin(), s.end());
+        }
+
+        case DataType::Float: {
+            if (!std::holds_alternative<double>(value)) {
+                throw CatalogError("data item '" + item.id + "': expected a numeric value");
+            }
+            double raw_d = item.encoding.scale != 0.0 ? std::get<double>(value) / item.encoding.scale
+                                                        : std::get<double>(value);
+            double rounded = std::round(raw_d);
+
+            uint64_t max_raw = (item.encoding.bytes >= 8) ? UINT64_MAX
+                                                            : ((uint64_t{1} << (item.encoding.bytes * 8)) - 1);
+            if (rounded < 0.0 || rounded > static_cast<double>(max_raw)) {
+                throw CatalogError("data item '" + item.id + "': value out of range (0.." +
+                                    std::to_string(static_cast<double>(max_raw) * item.encoding.scale) + ")");
+            }
+            return uint_to_bytes(static_cast<uint64_t>(rounded), item.encoding.bytes, item.encoding.endian == "big");
+        }
+
+        case DataType::Enum: {
+            if (!std::holds_alternative<std::string>(value)) {
+                throw CatalogError("data item '" + item.id + "': expected a string label");
+            }
+            const std::string &label = std::get<std::string>(value);
+            for (auto &ev : item.values) {
+                if (ev.label == label) {
+                    // The schema has no width field for enum DIDs (Float's
+                    // encoding.bytes has no Enum equivalent, and B1's own
+                    // scope says "no new schema needed") -- every catalog
+                    // in this project uses a single-byte enum DID, matching
+                    // what the mock/uds_doip adapters actually read/write,
+                    // so that's the one width encode() produces. A future
+                    // multi-byte enum DID would need a real schema addition,
+                    // not a guess baked in here.
+                    return {static_cast<uint8_t>(ev.raw)};
+                }
+            }
+            throw CatalogError("data item '" + item.id + "': '" + label + "' is not a valid value (see /docs)");
+        }
+
+        case DataType::Raw:
+            if (!std::holds_alternative<std::string>(value)) {
+                throw CatalogError("data item '" + item.id + "': expected a hex string value");
+            }
+            return from_hex(item.id, std::get<std::string>(value));
+    }
+    throw CatalogError("data item '" + item.id + "': unknown type");
 }
 
 } // namespace sovd::catalog

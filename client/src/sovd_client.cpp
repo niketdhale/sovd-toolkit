@@ -168,9 +168,36 @@ std::vector<DataValue> SovdClient::get_data_batch(const std::string &path, const
     return out;
 }
 
-void SovdClient::put_data(const std::string &path, const std::string &id, const std::string &hex_value,
+void SovdClient::put_data(const std::string &path, const std::string &id, const json &value,
                            const std::string &lock_id) {
-    request("PUT", "/v1/entities/" + path + "/data/" + id, json{{"value", hex_value}}.dump(), lock_id);
+    request("PUT", "/v1/entities/" + path + "/data/" + id, json{{"value", value}}.dump(), lock_id);
+}
+
+void SovdClient::put_typed_data(const std::string &path, const std::string &id, const std::string &raw_value,
+                                 const std::string &lock_id) {
+    bool is_float = false;
+    try {
+        DocsResult docs = get_docs(path);
+        for (auto &d : docs.data) {
+            if (d.id == id) {
+                is_float = (d.type == "float");
+                break;
+            }
+        }
+    } catch (const SovdError &) {
+        // No /docs to consult (e.g. a grouping node) -- fall through and
+        // treat raw_value as a string/hex, same as an unnamed DID would be.
+    }
+
+    if (is_float) {
+        try {
+            put_data(path, id, std::stod(raw_value), lock_id);
+            return;
+        } catch (const std::invalid_argument &) {
+            throw SovdError(0, "BAD_REQUEST", "'" + raw_value + "' is not a valid number for this data item");
+        }
+    }
+    put_data(path, id, raw_value, lock_id);
 }
 
 void SovdClient::set_mode(const std::string &path, const std::string &mode, const std::string &lock_id) {

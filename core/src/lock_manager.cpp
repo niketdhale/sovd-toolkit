@@ -1,5 +1,6 @@
 #include "sovd/lock_manager.hpp"
 
+#include <algorithm>
 #include <sstream>
 
 namespace sovd {
@@ -21,6 +22,7 @@ std::optional<std::string> LockManager::acquire(const std::string &entity_path, 
     if (locked_unexpired(entity_path)) {
         return std::nullopt;
     }
+    ttl_seconds = std::min(ttl_seconds, kMaxLockTtlSeconds);
     std::ostringstream oss;
     oss << "lock-" << next_id_++;
     std::string id = oss.str();
@@ -56,6 +58,7 @@ LockRenewResult LockManager::renew(const std::string &entity_path, const std::st
     if (it->second.lock_id != lock_id) {
         return LockRenewResult::WrongId;
     }
+    ttl_seconds = std::min(ttl_seconds, kMaxLockTtlSeconds);
     it->second.expires_at = clock_() + std::chrono::seconds(ttl_seconds);
     return LockRenewResult::Renewed;
 }
@@ -69,6 +72,15 @@ bool LockManager::check_lock(const std::string &entity_path, const std::string &
 bool LockManager::is_locked(const std::string &entity_path) const {
     std::lock_guard<std::mutex> lk(mtx_);
     return locked_unexpired(entity_path);
+}
+
+size_t LockManager::held_lock_count() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    size_t count = 0;
+    for (auto &kv : locks_) {
+        if (clock_() < kv.second.expires_at) count++;
+    }
+    return count;
 }
 
 } // namespace sovd

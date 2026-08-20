@@ -76,6 +76,12 @@ int main(int argc, char **argv) {
     EntityRegistry registry;
     LockManager locks;
     httplib::Server svr;
+    // Phase 8: max request body -- native httplib feature (rung 4: don't
+    // hand-roll what the platform already does), not opt-in like MQTT/CORS
+    // since this is a security property, not a demo convenience. Every
+    // legitimate SOVD write body is a few bytes of JSON ({"value": ...});
+    // 64KiB is generous headroom, not a real ceiling on anything valid.
+    svr.set_payload_max_length(64 * 1024);
 
     // Router needs a server_id/role at construction, but in config mode
     // those only become known once load_topology_from_file() below has

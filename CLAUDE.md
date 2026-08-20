@@ -20,7 +20,17 @@ lock-heartbeat lifecycle per D3. `npm run build` type-checks clean and every
 API call pattern was verified live with curl against a real server, but
 **no browser automation was available to visually exercise the rendered
 UI** — that's the one remaining check before calling this fully done, not
-just built. Phase 8 (hardening) is next and hasn't started.
+just built.
+
+**Phase 8 (hardening) is in progress, started 2026-08-20.** Done so far:
+default-deny route whitelist at the gateway tier, and all four resource
+limits (entity-tree depth cap, lock TTL ceiling, max-concurrent-locks as the
+UDS-session-cap proxy, max request body) — both live-verified against the
+real two-tier demo, not just unit-tested. 509 assertions in `test_core` (up
+from 381), `test_uds_doip` 180, `test_client` 32 — all passing. Remaining:
+mTLS, OAuth2, SecurityAccess wiring (needs OAuth2 first, per D2), per-adapter
+bounded queue, per-adapter connection pooling, explicit persistence
+write-up.
 
 ### Blockers (server-side, must land before UI code)
 | id | What | Blocks | Where it's specified |
@@ -1258,14 +1268,98 @@ else streamed).
       - an OAuth2 scope check = whether this client may request that level.
       One without the other is incomplete. Real key derivation stays
       OEM-proprietary; the stand-in must remain visibly labelled.
-- [ ] **Default-deny path/method whitelist** at the gateway tier
-- [ ] **Resource limits as a security property** — max concurrent sessions, max
-      request body, max entity-tree depth, lock TTL ceiling. Unbounded any of
-      these is a DoS on a safety-adjacent interface. (`SOVD_MAX_DATA_LEN`
-      exists; the rest don't.) Note the **lock TTL ceiling interacts with
-      D3**: a browser needs a *short* TTL, so the ceiling must not be set so
-      low that the CLI's longer sessions break, nor so high that a crashed
-      tab strands an entity.
+- [x] **Default-deny path/method whitelist at the gateway tier — DONE,
+      2026-08-20.** `routes.cpp`'s existing pre-routing hook (already home to
+      CORS and per-request timing) gained one more check: when `role_ ==
+      "gateway"`, every request's (method, path) is matched against
+      `gateway_route_whitelist()` — a small explicit `(method, regex)` table
+      mirroring the patterns `register_routes()` itself registers — *before*
+      entity lookup or adapter dispatch runs. No match → `403 FORBIDDEN`,
+      never reaching routing logic at all. Domain-role servers are untouched
+      (the check is gated on role, so `vehicle/body`'s domain server still
+      404s on an unknown path exactly as before). A deliberate, explicit
+      second list rather than introspecting httplib's internal handler
+      table (it doesn't expose one) — an auditable security policy, not an
+      accident of whatever got registered; the real payoff is that a
+      *future* route added to `register_routes()` without a matching
+      whitelist entry is unreachable through the gateway by default instead
+      of silently exposed, matching "capability reduction by linkage >
+      runtime checks" applied at the HTTP layer (linkage alone can't gate
+      this since gateway and domain share one binary/route table). Denials
+      emit a `gateway_route_denied` event (method, path, correlation_id) —
+      exactly the kind of signal Phase 3's alerting cares about (a client
+      probing the gateway for unexpected paths).
+      **Drift check, not just a positive test:** `test_core.cpp` has
+      `test_http_gateway_whitelist_allows_every_real_route()`, which walks
+      every actual registered route (root, entities, faults get/delete,
+      data batch/item/put, modes, operations, locks post/put/delete, docs,
+      the SSE stream) through a `role=gateway` `TestServer` and asserts none
+      of them get the whitelist's specific denial message — if a future
+      route is added to `register_routes()` without a matching whitelist
+      entry, this test fails as a spurious denial rather than the drift
+      going unnoticed. `test_http_gateway_whitelist_denies_unlisted_path()`
+      confirms an unlisted path gets `403`/`FORBIDDEN`.
+      **Verified live** against the real two-tier demo
+      (`config/domain_body.yaml` + `config/gateway.yaml`): legitimate
+      proxied routes (`/v1/entities`, `/v1/entities/vehicle/body/bcm/docs`)
+      return `200` through the gateway; `GET /v1/admin/debug` (not a real
+      route, standing in for "some future route") returns `403 FORBIDDEN`
+      through the gateway but a plain `404` on the domain server on the same
+      path — confirming the whitelist is gateway-only, not a global change;
+      the `gateway_route_denied` event fired with a correlation id in the
+      gateway's event stream for the denied request.
+- [x] **Resource limits as a security property — DONE, 2026-08-20.**
+      Corrects a stale claim in this file: `SOVD_MAX_DATA_LEN` did **not**
+      actually exist anywhere in the codebase before this pass — all four
+      limits below are new.
+      - **Entity-tree depth ceiling**: `kMaxEntityPathDepth = 16` in
+        `entity_registry.hpp`; `add_entity()` rejects (returns `false`, same
+        failure path as orphan/duplicate rejection) any path deeper than
+        that. Far beyond any real vehicle topology; bounds recursive/listing
+        work an attacker-controlled config or proxy chain could otherwise
+        force unboundedly deep.
+      - **Lock TTL ceiling**: `kMaxLockTtlSeconds = 3600` in
+        `lock_manager.hpp`. **Clamped, not rejected** — `acquire()` and
+        `renew()` both cap the requested TTL — so an over-generous request
+        degrades to "as long as we'll allow" instead of failing outright.
+        Comfortably above both the CLI's 60s default and D3's 10s browser
+        TTL, resolving the noted D3 interaction: the ceiling had to sit
+        above every legitimate client's real TTL, and 3600s does. `routes.cpp`
+        now echoes the actually-*granted* (clamped) `ttl_seconds` in the
+        `POST`/`PUT .../locks` response body, not the raw requested value —
+        a client asking for an absurd TTL sees the true grant, not a lie.
+      - **Max concurrent locks, doubling as the session cap**: no new
+        tracking needed — `LockManager::held_lock_count()` counts currently
+        unexpired locks, and since UDS session escalation is *always*
+        lock-gated (the settled session-manager-ownership decision above),
+        "how many entities are locked right now" already bounds "how many
+        entities could have an escalated session right now." `routes.cpp`
+        enforces `kMaxConcurrentLocks = 64` in `handle_post_lock`, emitting
+        `lock_denied` (`reason: "capacity"`) and `503 BUSY` at the cap — the
+        policy decision lives in `Router`, `LockManager` just answers the
+        query. Reused an existing mechanism instead of inventing new session
+        tracking, matching the same instinct as the Phase 2 session-manager
+        design.
+      - **Max request body**: `svr.set_payload_max_length(64 * 1024)` in
+        `main.cpp` — a native `httplib` feature, not hand-rolled. Every
+        legitimate SOVD write body is a few bytes of JSON; 64KiB is generous
+        headroom, not a real ceiling on anything valid.
+      **Tests**: `test_registry_rejects_excessive_depth` (boundary-exact:
+      depth 16 allowed, 17 rejected), `test_lock_acquire_clamps_excessive_ttl`
+      / `test_lock_renew_clamps_excessive_ttl` (via `FakeClock`, proving the
+      raw huge TTL was never actually honored), `test_lock_held_lock_count_
+      tracks_active_locks_only`, `test_http_lock_post_rejects_at_server_
+      wide_capacity` (real HTTP through `TestServer`, pre-filling 64
+      synthetic locks directly via `LockManager::acquire()` then asserting a
+      real `POST .../locks` gets `503`, then that releasing one filler
+      unblocks a subsequent `201`). 509 assertions passing in `test_core`
+      (up from 492), `test_uds_doip` (180) and `test_client` (32) unaffected.
+      **Verified live** against `config/domain_body.yaml`: a normal small
+      write still succeeds (`204`); a 70KB oversized `PUT` body is rejected
+      with `413`; `POST .../locks -d '{"ttl_seconds":999999999}'` returns
+      `{"lock_id":"lock-2","ttl_seconds":3600}` — both the internal clamp and
+      the corrected response-echo confirmed end-to-end, not just at the unit
+      level.
 - [ ] Per-adapter bounded request queue → `503` rather than piling up requests
       the bus cannot service
 - [ ] Per-adapter connection pooling — DoIP routing activation is expensive,

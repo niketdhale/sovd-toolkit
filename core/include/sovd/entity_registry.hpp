@@ -13,6 +13,14 @@ namespace sovd {
 
 enum class EntityType { Vehicle, Area, Component };
 
+// Phase 8: unbounded entity-tree depth is a DoS on a safety-adjacent
+// interface (a pathological config, or -- once Phase 4's config loader
+// ever reads anything untrusted -- a crafted one, could otherwise recurse
+// registry/proxy logic arbitrarily deep). 16 is far beyond any real vehicle
+// topology (the demo tops out at 3: vehicle/body/bcm) but still a real
+// ceiling, not a formality.
+inline constexpr int kMaxEntityPathDepth = 16;
+
 std::string entity_type_to_string(EntityType t);
 
 struct Entity {
@@ -38,10 +46,10 @@ public:
     EntityRegistry(const EntityRegistry &) = delete;
     EntityRegistry &operator=(const EntityRegistry &) = delete;
 
-    // Fails (returns false) if path is empty, already registered, or its
-    // parent (everything before the last '/') is not already registered —
-    // orphan rejection. A path with no '/' is a root entity and needs no
-    // parent.
+    // Fails (returns false) if path is empty, already registered, its
+    // parent (everything before the last '/') is not already registered
+    // (orphan rejection — a path with no '/' is a root entity and needs no
+    // parent), or path is nested deeper than kMaxEntityPathDepth segments.
     bool add_entity(const std::string &path, EntityType type,
                      const sovd_vtable_t *vtable = nullptr,
                      sovd_adapter_ctx *ctx = nullptr);

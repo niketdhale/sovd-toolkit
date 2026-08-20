@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <iostream>
 #include <random>
+#include <regex>
 #include <sstream>
 #include <variant>
 #include <vector>
@@ -18,6 +19,11 @@ namespace sovd::server {
 using json = nlohmann::json;
 
 namespace {
+
+// Phase 8: see the comment at its one call site (handle_post_lock) for why
+// this is also the effective cap on concurrently escalated UDS sessions.
+// Generous for any real vehicle's entity count, still a real ceiling.
+constexpr size_t kMaxConcurrentLocks = 64;
 
 void emit_event(const Router::EventSink &sink, const std::string &type, json fields) {
     fields["event"] = type;
@@ -58,6 +64,43 @@ int http_status_for(sovd_result_t r) {
 void write_error(httplib::Response &res, int status, const std::string &code, const std::string &message) {
     res.status = status;
     res.set_content(json{{"error", code}, {"message", message}}.dump(), "application/json");
+}
+
+// Phase 8: default-deny whitelist for gateway-role servers. Same patterns as
+// register_routes() below -- kept as a second, explicit list rather than
+// derived from httplib's internal handler table (it doesn't expose one to
+// introspect) so this is an auditable security policy, not an accident of
+// whatever got registered. A gateway forwards the same resource surface a
+// domain server answers directly (CLAUDE.md's role model), so today this
+// mirrors every real route; the point is a *future* route added to
+// register_routes() without a matching entry here is unreachable through a
+// gateway by default instead of silently exposed. test_core has a drift
+// check that walks every real route through this list with role=gateway.
+const std::vector<std::pair<std::string, std::regex>> &gateway_route_whitelist() {
+    static const std::vector<std::pair<std::string, std::regex>> routes = {
+        {"GET", std::regex(R"(^/$)")},
+        {"GET", std::regex(R"(^/v1/entities$)")},
+        {"GET", std::regex(R"(^/v1/entities/.+/faults$)")},
+        {"DELETE", std::regex(R"(^/v1/entities/.+/faults$)")},
+        {"GET", std::regex(R"(^/v1/entities/.+/data$)")},
+        {"GET", std::regex(R"(^/v1/entities/.+/data/.+/stream$)")},
+        {"GET", std::regex(R"(^/v1/entities/.+/data/.+$)")},
+        {"PUT", std::regex(R"(^/v1/entities/.+/data/.+$)")},
+        {"POST", std::regex(R"(^/v1/entities/.+/modes$)")},
+        {"POST", std::regex(R"(^/v1/entities/.+/operations/.+$)")},
+        {"POST", std::regex(R"(^/v1/entities/.+/locks$)")},
+        {"PUT", std::regex(R"(^/v1/entities/.+/locks/[^/]+$)")},
+        {"DELETE", std::regex(R"(^/v1/entities/.+/locks/[^/]+$)")},
+        {"GET", std::regex(R"(^/v1/entities/.+/docs$)")},
+    };
+    return routes;
+}
+
+bool gateway_route_allowed(const std::string &method, const std::string &path) {
+    for (auto &[m, pattern] : gateway_route_whitelist()) {
+        if (m == method && std::regex_match(path, pattern)) return true;
+    }
+    return false;
 }
 
 std::string to_hex(const uint8_t *data, size_t len) {
@@ -230,6 +273,21 @@ void Router::register_routes(httplib::Server &svr) {
         }
 
         apply_cors_headers(req, res);
+
+        // Phase 8: default-deny at the gateway tier. Checked here, before
+        // any route handler runs, so a request that doesn't match the
+        // whitelist never reaches entity lookup / adapter dispatch at all --
+        // "capability reduction by linkage > runtime checks" (CLAUDE.md)
+        // applied at the HTTP layer, since role can't be enforced by
+        // linkage alone when gateway and domain share one binary.
+        if (role_ == "gateway" && !gateway_route_allowed(req.method, req.path)) {
+            std::string corr = correlation_id_for(req, res);
+            emit_event(event_sink_, "gateway_route_denied",
+                       {{"method", req.method}, {"path", req.path}, {"correlation_id", corr}});
+            write_error(res, 403, "FORBIDDEN", "path/method not permitted on a gateway-tier server");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+
         return httplib::Server::HandlerResponse::Unhandled;
     });
     svr.set_logger([this](const httplib::Request &req, const httplib::Response &res) {
@@ -755,6 +813,19 @@ void Router::handle_post_lock(const httplib::Request &req, httplib::Response &re
         return;
     }
 
+    // Phase 8: server-wide cap on concurrently held locks, which -- since
+    // session escalation only ever happens from a lock-gated call
+    // (CLAUDE.md's settled session-manager-ownership decision) -- doubles
+    // as a cap on concurrently escalated UDS sessions with no separate
+    // session-tracking needed. A capacity rejection is BUSY/503 (transient,
+    // retry-worthy), distinct from LOCKED/423 (a specific conflict that
+    // retrying won't resolve until someone else releases).
+    if (locks_.held_lock_count() >= kMaxConcurrentLocks) {
+        emit_event(event_sink_, "lock_denied", {{"entity", path}, {"correlation_id", corr}, {"reason", "capacity"}});
+        write_error(res, 503, "BUSY", "server-wide lock capacity reached");
+        return;
+    }
+
     auto lock_id = locks_.acquire(path, ttl);
     if (!lock_id) {
         emit_event(event_sink_, "lock_denied", {{"entity", path}, {"correlation_id", corr}});
@@ -762,9 +833,13 @@ void Router::handle_post_lock(const httplib::Request &req, httplib::Response &re
         return;
     }
 
+    // ttl_seconds echoed back is what LockManager actually granted (it
+    // clamps to kMaxLockTtlSeconds internally) -- not the raw request, which
+    // would otherwise tell a client its 999999s lock was honored verbatim.
+    int granted_ttl = std::min(ttl, kMaxLockTtlSeconds);
     emit_event(event_sink_, "lock_acquired", {{"entity", path}, {"lock_id", *lock_id}, {"correlation_id", corr}});
     res.status = 201;
-    res.set_content(json{{"lock_id", *lock_id}, {"ttl_seconds", ttl}}.dump(), "application/json");
+    res.set_content(json{{"lock_id", *lock_id}, {"ttl_seconds", granted_ttl}}.dump(), "application/json");
 }
 
 void Router::handle_put_lock(const httplib::Request &req, httplib::Response &res, const std::string &path,
@@ -792,10 +867,12 @@ void Router::handle_put_lock(const httplib::Request &req, httplib::Response &res
     }
 
     switch (locks_.renew(path, lock_id, ttl)) {
-        case LockRenewResult::Renewed:
+        case LockRenewResult::Renewed: {
+            int granted_ttl = std::min(ttl, kMaxLockTtlSeconds); // echo what was actually granted, not the raw request
             emit_event(event_sink_, "lock_renewed", {{"entity", path}, {"lock_id", lock_id}, {"correlation_id", corr}});
-            res.set_content(json{{"lock_id", lock_id}, {"ttl_seconds", ttl}}.dump(), "application/json");
+            res.set_content(json{{"lock_id", lock_id}, {"ttl_seconds", granted_ttl}}.dump(), "application/json");
             break;
+        }
         case LockRenewResult::WrongId:
             // Own event name (not lock_release_mismatch) since this wasn't
             // a release attempt -- same security signature though (wrong

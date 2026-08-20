@@ -33,6 +33,9 @@ bool EntityRegistry::add_entity(const std::string &path, EntityType type,
     std::lock_guard<std::mutex> lk(mtx_);
     if (path.empty() || entities_.count(path)) return false;
 
+    int depth = static_cast<int>(std::count(path.begin(), path.end(), '/')) + 1;
+    if (depth > kMaxEntityPathDepth) return false;
+
     std::string parent = parent_of(path);
     if (!parent.empty() && !entities_.count(parent)) {
         return false; // orphan rejection

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <optional>
 #include <string>
@@ -17,11 +18,20 @@ using SteadyClock = std::function<std::chrono::steady_clock::time_point()>;
 enum class LockReleaseResult { Released, NotFound, WrongId };
 enum class LockRenewResult { Renewed, NotFound, WrongId };
 
+// Phase 8: an unbounded TTL is a DoS on a safety-adjacent interface (one
+// client parks a lock for a year, every other tester is locked out for a
+// year) -- clamped, not rejected, so an over-generous request degrades to
+// "as long as we'll allow" instead of failing outright. Comfortably above
+// both the CLI's 60s default and D3's 10s browser TTL; well below "may as
+// well be forever."
+inline constexpr int kMaxLockTtlSeconds = 3600;
+
 class LockManager {
 public:
     explicit LockManager(SteadyClock clock = default_clock);
 
     // nullopt means the entity is already locked and unexpired (conflict).
+    // ttl_seconds is clamped to kMaxLockTtlSeconds, not rejected.
     std::optional<std::string> acquire(const std::string &entity_path, int ttl_seconds);
 
     LockReleaseResult release(const std::string &entity_path, const std::string &lock_id);
@@ -37,6 +47,17 @@ public:
     bool check_lock(const std::string &entity_path, const std::string &supplied_lock_id) const;
 
     bool is_locked(const std::string &entity_path) const;
+
+    // Phase 8: number of currently held (unexpired) locks server-wide.
+    // Doubles as an upper bound on concurrently escalated UDS sessions
+    // without LockManager needing to know sessions exist at all: escalation
+    // only ever happens from a lock-gated call (CLAUDE.md's settled session-
+    // manager-ownership decision), so "how many entities are locked right
+    // now" already bounds "how many entities could have an escalated
+    // session right now." The policy decision (what the cap is, what error
+    // code a rejection maps to) lives in Router, not here -- this is just
+    // the query.
+    size_t held_lock_count() const;
 
 private:
     static std::chrono::steady_clock::time_point default_clock();

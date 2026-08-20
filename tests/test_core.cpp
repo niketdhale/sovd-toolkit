@@ -4,6 +4,7 @@
 #include <cstring>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 #include "httplib.h"
 #include "json.hpp"
@@ -95,6 +96,21 @@ void test_registry_unknown_path_not_found() {
     EntityRegistry reg;
     ASSERT_TRUE(reg.find("vehicle/nope") == nullptr);
     ASSERT_FALSE(reg.remove_entity("vehicle/nope"));
+}
+
+// Phase 8: unbounded entity-tree depth is a DoS on a safety-adjacent
+// interface. kMaxEntityPathDepth == 16 -- tests the exact boundary, not
+// just "some deep path fails somewhere".
+void test_registry_rejects_excessive_depth() {
+    EntityRegistry reg;
+    std::string path = "a";
+    for (int depth = 1; depth <= kMaxEntityPathDepth; ++depth) {
+        ASSERT_EQ(static_cast<int>(std::count(path.begin(), path.end(), '/')) + 1, depth);
+        ASSERT_TRUE(reg.add_entity(path, EntityType::Area)); // depths 1..16: all allowed
+        path += "/a";
+    }
+    ASSERT_EQ(static_cast<int>(std::count(path.begin(), path.end(), '/')) + 1, kMaxEntityPathDepth + 1);
+    ASSERT_FALSE(reg.add_entity(path, EntityType::Area)); // depth 17: over the line
 }
 
 // ---------------------------------------------------------------------
@@ -195,6 +211,54 @@ void test_lock_renew_not_found_after_expiry() {
     auto id = locks.acquire("vehicle/body/bcm", 10);
     clock.advance(11);
     ASSERT_TRUE(locks.renew("vehicle/body/bcm", *id, 10) == LockRenewResult::NotFound);
+}
+
+// Phase 8: an unbounded TTL is a DoS -- acquire() clamps to
+// kMaxLockTtlSeconds rather than honoring an arbitrarily large request.
+void test_lock_acquire_clamps_excessive_ttl() {
+    FakeClock clock;
+    LockManager locks([&clock] { return clock(); });
+
+    auto id = locks.acquire("vehicle/body/bcm", kMaxLockTtlSeconds * 100);
+    ASSERT_TRUE(id.has_value());
+
+    clock.advance(kMaxLockTtlSeconds + 1); // past the ceiling, nowhere near the requested TTL
+    ASSERT_FALSE(locks.is_locked("vehicle/body/bcm")); // proves the raw huge value was NOT honored
+}
+
+void test_lock_renew_clamps_excessive_ttl() {
+    FakeClock clock;
+    LockManager locks([&clock] { return clock(); });
+
+    auto id = locks.acquire("vehicle/body/bcm", 10);
+    ASSERT_TRUE(locks.renew("vehicle/body/bcm", *id, kMaxLockTtlSeconds * 100) == LockRenewResult::Renewed);
+
+    clock.advance(kMaxLockTtlSeconds + 1);
+    ASSERT_FALSE(locks.is_locked("vehicle/body/bcm"));
+}
+
+// Phase 8: held_lock_count() is the mechanism handle_post_lock's
+// server-wide capacity check reads -- and, per CLAUDE.md's settled
+// session-manager-ownership decision (escalation is always lock-gated),
+// doubles as a bound on concurrently escalated UDS sessions with no
+// separate session tracking. Not tied to real registered entities --
+// LockManager keys are opaque path strings to it, it has no idea whether
+// the registry even has an entity by that name.
+void test_lock_held_lock_count_tracks_active_locks_only() {
+    FakeClock clock;
+    LockManager locks([&clock] { return clock(); });
+
+    ASSERT_EQ(locks.held_lock_count(), static_cast<size_t>(0));
+    auto id1 = locks.acquire("a", 10);
+    auto id2 = locks.acquire("b", 10);
+    ASSERT_EQ(locks.held_lock_count(), static_cast<size_t>(2));
+
+    locks.release("a", *id1);
+    ASSERT_EQ(locks.held_lock_count(), static_cast<size_t>(1));
+
+    clock.advance(11); // "b" expires -- not released, just timed out
+    ASSERT_EQ(locks.held_lock_count(), static_cast<size_t>(0));
+    (void)id2;
 }
 
 // ---------------------------------------------------------------------
@@ -822,6 +886,35 @@ void test_http_lock_renew() {
     ASSERT_EQ(no_lock_renew->status, 404);
 }
 
+// Phase 8: server-wide lock capacity, tested through real HTTP against
+// handle_post_lock's actual check -- not just LockManager's own count.
+// Pre-fills the same LockManager the router uses with synthetic path
+// strings directly (LockManager has no idea whether the registry even has
+// an entity by that name; held_lock_count() is a pure global count), then
+// confirms a real POST /locks against a real entity gets 503 once at
+// capacity, and 201 again the moment capacity frees up.
+void test_http_lock_post_rejects_at_server_wide_capacity() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    std::vector<std::string> filler_ids;
+    for (size_t i = 0; i < 64; ++i) {
+        auto id = ts.locks.acquire("synthetic-" + std::to_string(i), 60);
+        ASSERT_TRUE(id.has_value());
+        filler_ids.push_back(*id);
+    }
+    ASSERT_EQ(ts.locks.held_lock_count(), static_cast<size_t>(64));
+
+    auto at_capacity = cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    ASSERT_TRUE(at_capacity != nullptr);
+    ASSERT_EQ(at_capacity->status, 503);
+
+    ts.locks.release("synthetic-0", filler_ids[0]);
+    auto after_release = cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
+    ASSERT_TRUE(after_release != nullptr);
+    ASSERT_EQ(after_release->status, 201);
+}
+
 void test_http_mode_and_operation() {
     TestServer ts;
     httplib::Client cli("127.0.0.1", ts.port);
@@ -1136,6 +1229,76 @@ void test_http_cors_applies_to_sse_stream_endpoint() {
         },
         [&](const char *, size_t) { return false; }); // stop right after headers + first chunk
     ASSERT_TRUE(got_header);
+}
+
+// ---------------------------------------------------------------------
+// Phase 8: default-deny route whitelist at the gateway tier. Drift check:
+// walk every real registered route with role=gateway and confirm none of
+// them get the whitelist's specific denial -- if a future route is added to
+// register_routes() without a matching entry in gateway_route_whitelist(),
+// this test catches it (as a spurious denial), rather than the mismatch
+// silently narrowing gateway capability or silently exposing a new route.
+
+void test_http_gateway_whitelist_denies_unlisted_path() {
+    TestServer ts;
+    ts.router.set_role("gateway");
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto res = cli.Get("/v1/admin/debug");
+    ASSERT_TRUE(res != nullptr);
+    ASSERT_EQ(res->status, 403);
+    json body = json::parse(res->body);
+    ASSERT_EQ(body["error"].get<std::string>(), "FORBIDDEN");
+}
+
+void test_http_gateway_whitelist_allows_every_real_route() {
+    TestServer ts;
+    ts.router.set_role("gateway");
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto assert_not_whitelist_denied = [](const httplib::Result &res, const std::string &label) {
+        ASSERT_TRUE(res != nullptr);
+        if (res->status == 403) {
+            json body = json::parse(res->body);
+            // A genuine business-logic 403 (e.g. SOVD_FORBIDDEN) is fine here;
+            // only the whitelist's specific message means this route drifted
+            // out of sync with register_routes().
+            ASSERT_TRUE(body["message"].get<std::string>().find("not permitted on a gateway-tier server") ==
+                        std::string::npos);
+        }
+        (void)label;
+    };
+
+    assert_not_whitelist_denied(cli.Get("/"), "root");
+    assert_not_whitelist_denied(cli.Get("/v1/entities"), "entities");
+    assert_not_whitelist_denied(cli.Get("/v1/entities/vehicle/body/bcm/faults"), "faults get");
+    assert_not_whitelist_denied(cli.Delete("/v1/entities/vehicle/body/bcm/faults"), "faults delete");
+    assert_not_whitelist_denied(cli.Get("/v1/entities/vehicle/body/bcm/data?ids=vin"), "data batch");
+    assert_not_whitelist_denied(cli.Get("/v1/entities/vehicle/body/bcm/data/vin"), "data item");
+    assert_not_whitelist_denied(
+        cli.Put("/v1/entities/vehicle/body/bcm/data/vin", R"({"value":"12345678901234567"})", "application/json"),
+        "data put");
+    assert_not_whitelist_denied(
+        cli.Post("/v1/entities/vehicle/body/bcm/modes", R"({"mode":"default"})", "application/json"), "modes");
+    assert_not_whitelist_denied(
+        cli.Post("/v1/entities/vehicle/body/bcm/operations/self_test", "{}", "application/json"), "operations");
+    assert_not_whitelist_denied(
+        cli.Post("/v1/entities/vehicle/body/bcm/locks", R"({"ttl_seconds":10})", "application/json"), "locks post");
+    assert_not_whitelist_denied(cli.Put("/v1/entities/vehicle/body/bcm/locks/lock-1", "{}", "application/json"),
+                                 "locks put");
+    assert_not_whitelist_denied(cli.Delete("/v1/entities/vehicle/body/bcm/locks/lock-1"), "locks delete");
+    assert_not_whitelist_denied(cli.Get("/v1/entities/vehicle/body/bcm/docs"), "docs");
+
+    cli.set_read_timeout(2, 0);
+    bool stream_denied = false;
+    cli.Get(
+        "/v1/entities/vehicle/body/bcm/data/vin/stream?interval_ms=100", httplib::Headers{},
+        [&](const httplib::Response &res) {
+            stream_denied = res.status == 403;
+            return true;
+        },
+        [&](const char *, size_t) { return false; });
+    ASSERT_FALSE(stream_denied);
 }
 
 // Pure MQTT packet framing -- no socket, no broker. Matches the
@@ -1547,6 +1710,7 @@ int main() {
     RUN_TEST(test_registry_list_all_preserves_insertion_order);
     RUN_TEST(test_registry_remove_rejects_node_with_children);
     RUN_TEST(test_registry_unknown_path_not_found);
+    RUN_TEST(test_registry_rejects_excessive_depth);
 
     RUN_TEST(test_lock_acquire_and_conflict);
     RUN_TEST(test_lock_expires_after_ttl);
@@ -1556,6 +1720,9 @@ int main() {
     RUN_TEST(test_lock_renew_extends_ttl_and_keeps_id);
     RUN_TEST(test_lock_renew_wrong_id_leaves_ttl_unchanged);
     RUN_TEST(test_lock_renew_not_found_after_expiry);
+    RUN_TEST(test_lock_acquire_clamps_excessive_ttl);
+    RUN_TEST(test_lock_renew_clamps_excessive_ttl);
+    RUN_TEST(test_lock_held_lock_count_tracks_active_locks_only);
 
     RUN_TEST(test_mock_adapter_faults_roundtrip);
     RUN_TEST(test_mock_adapter_data_read_write);
@@ -1590,6 +1757,7 @@ int main() {
     RUN_TEST(test_http_write_data_locked_without_header_423);
     RUN_TEST(test_http_lock_conflict_and_release);
     RUN_TEST(test_http_lock_renew);
+    RUN_TEST(test_http_lock_post_rejects_at_server_wide_capacity);
     RUN_TEST(test_http_mode_and_operation);
 
     RUN_TEST(test_http_docs_lists_catalog_data_and_operations);
@@ -1606,6 +1774,8 @@ int main() {
     RUN_TEST(test_http_cors_allowed_origin_gets_headers);
     RUN_TEST(test_http_cors_preflight_options);
     RUN_TEST(test_http_cors_applies_to_sse_stream_endpoint);
+    RUN_TEST(test_http_gateway_whitelist_denies_unlisted_path);
+    RUN_TEST(test_http_gateway_whitelist_allows_every_real_route);
 
     RUN_TEST(test_mqtt_encode_connect_packet);
     RUN_TEST(test_mqtt_encode_publish_packet);

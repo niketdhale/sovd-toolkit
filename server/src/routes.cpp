@@ -235,6 +235,12 @@ void Router::register_routes(httplib::Server &svr) {
     svr.Post(R"(/v1/entities/(.+)/locks)", [this](const httplib::Request &req, httplib::Response &res) {
         handle_post_lock(req, res, req.matches[1]);
     });
+    // Phase 5: extends an already-held lock's TTL -- what the client SDK's
+    // RAII lock heartbeat calls at ttl/2, so a crashed tester's lock lapses
+    // on the original short TTL instead of needing one requested upfront.
+    svr.Put(R"(/v1/entities/(.+)/locks/([^/]+))", [this](const httplib::Request &req, httplib::Response &res) {
+        handle_put_lock(req, res, req.matches[1], req.matches[2]);
+    });
     svr.Delete(R"(/v1/entities/(.+)/locks/([^/]+))", [this](const httplib::Request &req, httplib::Response &res) {
         handle_delete_lock(req, res, req.matches[1], req.matches[2]);
     });
@@ -627,6 +633,50 @@ void Router::handle_post_lock(const httplib::Request &req, httplib::Response &re
     emit_event(event_sink_, "lock_acquired", {{"entity", path}, {"lock_id", *lock_id}, {"correlation_id", corr}});
     res.status = 201;
     res.set_content(json{{"lock_id", *lock_id}, {"ttl_seconds", ttl}}.dump(), "application/json");
+}
+
+void Router::handle_put_lock(const httplib::Request &req, httplib::Response &res, const std::string &path,
+                              const std::string &lock_id) {
+    std::string corr = correlation_id_for(req, res);
+    const Entity *e = require_entity(res, path);
+    if (!e) return;
+    if (try_forward(req, res, path)) return;
+
+    int ttl = 60;
+    if (!req.body.empty()) {
+        try {
+            json parsed = json::parse(req.body);
+            if (parsed.contains("ttl_seconds") && parsed["ttl_seconds"].is_number_integer()) {
+                ttl = parsed["ttl_seconds"].get<int>();
+            }
+        } catch (...) {
+            write_error(res, 400, "BAD_REQUEST", "invalid JSON body");
+            return;
+        }
+    }
+    if (ttl <= 0) {
+        write_error(res, 400, "BAD_REQUEST", "ttl_seconds must be positive");
+        return;
+    }
+
+    switch (locks_.renew(path, lock_id, ttl)) {
+        case LockRenewResult::Renewed:
+            emit_event(event_sink_, "lock_renewed", {{"entity", path}, {"lock_id", lock_id}, {"correlation_id", corr}});
+            res.set_content(json{{"lock_id", lock_id}, {"ttl_seconds", ttl}}.dump(), "application/json");
+            break;
+        case LockRenewResult::WrongId:
+            // Own event name (not lock_release_mismatch) since this wasn't
+            // a release attempt -- same security signature though (wrong
+            // lock_id against a held lock), so Phase 3's alert query below
+            // is extended to match both rather than adding a second rule.
+            emit_event(event_sink_, "lock_renew_mismatch",
+                       {{"entity", path}, {"lock_id", lock_id}, {"correlation_id", corr}});
+            write_error(res, 403, "FORBIDDEN", "lock_id does not match holder");
+            break;
+        case LockRenewResult::NotFound:
+            write_error(res, 404, "NOT_FOUND", "no active lock on entity");
+            break;
+    }
 }
 
 void Router::handle_delete_lock(const httplib::Request &req, httplib::Response &res, const std::string &path,

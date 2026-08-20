@@ -162,6 +162,39 @@ void test_lock_release_not_found() {
     ASSERT_TRUE(locks.release("vehicle/body/bcm", "anything") == LockReleaseResult::NotFound);
 }
 
+void test_lock_renew_extends_ttl_and_keeps_id() {
+    FakeClock clock;
+    LockManager locks([&clock] { return clock(); });
+
+    auto id = locks.acquire("vehicle/body/bcm", 10);
+    clock.advance(8); // not yet expired
+    ASSERT_TRUE(locks.renew("vehicle/body/bcm", *id, 10) == LockRenewResult::Renewed);
+
+    clock.advance(8); // would have expired under the original TTL, not the renewed one
+    ASSERT_TRUE(locks.is_locked("vehicle/body/bcm"));
+    ASSERT_TRUE(locks.check_lock("vehicle/body/bcm", *id)); // same id, not a new lock
+}
+
+void test_lock_renew_wrong_id_leaves_ttl_unchanged() {
+    FakeClock clock;
+    LockManager locks([&clock] { return clock(); });
+
+    auto id = locks.acquire("vehicle/body/bcm", 10);
+    ASSERT_TRUE(locks.renew("vehicle/body/bcm", "wrong-id", 60) == LockRenewResult::WrongId);
+
+    clock.advance(11); // original TTL elapses -- wrong-id renew didn't extend it
+    ASSERT_FALSE(locks.is_locked("vehicle/body/bcm"));
+}
+
+void test_lock_renew_not_found_after_expiry() {
+    FakeClock clock;
+    LockManager locks([&clock] { return clock(); });
+
+    auto id = locks.acquire("vehicle/body/bcm", 10);
+    clock.advance(11);
+    ASSERT_TRUE(locks.renew("vehicle/body/bcm", *id, 10) == LockRenewResult::NotFound);
+}
+
 // ---------------------------------------------------------------------
 // Mock adapter (direct vtable calls)
 // ---------------------------------------------------------------------
@@ -653,6 +686,31 @@ void test_http_lock_conflict_and_release() {
     // Now unlocked -> a fresh lock can be acquired.
     auto third = cli.Post("/v1/entities/vehicle/body/bcm/locks", "{}", "application/json");
     ASSERT_EQ(third->status, 201);
+}
+
+void test_http_lock_renew() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto acquired = cli.Post("/v1/entities/vehicle/body/bcm/locks", R"({"ttl_seconds":10})", "application/json");
+    ASSERT_EQ(acquired->status, 201);
+    std::string lock_id = json::parse(acquired->body)["lock_id"].get<std::string>();
+
+    auto renewed =
+        cli.Put(("/v1/entities/vehicle/body/bcm/locks/" + lock_id).c_str(), R"({"ttl_seconds":60})", "application/json");
+    ASSERT_TRUE(renewed != nullptr);
+    ASSERT_EQ(renewed->status, 200);
+    ASSERT_EQ(json::parse(renewed->body)["ttl_seconds"].get<int>(), 60);
+
+    auto wrong_id_renew =
+        cli.Put("/v1/entities/vehicle/body/bcm/locks/not-the-holder", R"({"ttl_seconds":60})", "application/json");
+    ASSERT_TRUE(wrong_id_renew != nullptr);
+    ASSERT_EQ(wrong_id_renew->status, 403);
+
+    auto no_lock_renew =
+        cli.Put("/v1/entities/vehicle/body/door_ctrl/locks/anything", R"({"ttl_seconds":60})", "application/json");
+    ASSERT_TRUE(no_lock_renew != nullptr);
+    ASSERT_EQ(no_lock_renew->status, 404);
 }
 
 void test_http_mode_and_operation() {
@@ -1168,6 +1226,9 @@ int main() {
     RUN_TEST(test_lock_check_lock_semantics);
     RUN_TEST(test_lock_release_wrong_id_keeps_lock);
     RUN_TEST(test_lock_release_not_found);
+    RUN_TEST(test_lock_renew_extends_ttl_and_keeps_id);
+    RUN_TEST(test_lock_renew_wrong_id_leaves_ttl_unchanged);
+    RUN_TEST(test_lock_renew_not_found_after_expiry);
 
     RUN_TEST(test_mock_adapter_faults_roundtrip);
     RUN_TEST(test_mock_adapter_data_read_write);
@@ -1196,6 +1257,7 @@ int main() {
     RUN_TEST(test_http_faults_status_filter);
     RUN_TEST(test_http_write_data_locked_without_header_423);
     RUN_TEST(test_http_lock_conflict_and_release);
+    RUN_TEST(test_http_lock_renew);
     RUN_TEST(test_http_mode_and_operation);
 
     RUN_TEST(test_http_docs_lists_catalog_data_and_operations);

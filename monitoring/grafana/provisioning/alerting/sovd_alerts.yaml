@@ -25,16 +25,19 @@ groups:
         labels:
           severity: high
         annotations:
-          summary: "A client released a lock with the wrong lock_id on {{ $labels.entity }}"
+          summary: "A client supplied the wrong lock_id releasing or renewing a lock on {{ $labels.entity }}"
         data:
           - refId: A
             relativeTimeRange: { from: 300, to: 0 }
             datasourceUid: <INFLUXDB_DATASOURCE_UID>
             model:
               rawQuery: true
+              # Phase 5 added lock_renew_mismatch (the RAII lock heartbeat's
+              # PUT /locks/{id} can fail the same way release can) -- same
+              # security signature, matched here instead of a second rule.
               query: >-
                 SELECT count("correlation_id") FROM sovd_events
-                WHERE event = 'lock_release_mismatch' AND $timeFilter
+                WHERE event =~ /^lock_release_mismatch$|^lock_renew_mismatch$/ AND $timeFilter
               resultFormat: time_series
           - refId: C
             datasourceUid: "-100"

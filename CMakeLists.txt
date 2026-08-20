@@ -12,6 +12,17 @@ endif()
 option(SOVD_ADAPTER_MOCK "Build the in-memory mock adapter" ON)
 option(SOVD_ADAPTER_UDS_DOIP "Build the UDS/DoIP adapter (Phase 2)" OFF)
 
+# mDNS (Phase 5) needs a real client library, not something worth hand-
+# rolling raw DNS-SD packet parsing for — avahi-client is the standard
+# Linux one and is what's actually installed here. Auto-detect rather than
+# defaulting ON unconditionally: not every dev machine has avahi, and the
+# rest of Phase 5 (SDK, CLI, RAII locks) must build without it.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(AVAHI_CLIENT QUIET avahi-client)
+endif()
+option(SOVD_CLIENT_MDNS "Build mDNS discovery/advertising (needs avahi-client)" ${AVAHI_CLIENT_FOUND})
+
 add_compile_options(-Wall -Wextra -Wpedantic)
 
 find_package(Threads REQUIRED)
@@ -99,6 +110,37 @@ add_executable(sovd_server server/src/main.cpp)
 target_include_directories(sovd_server PRIVATE adapters/mock)
 target_link_libraries(sovd_server PRIVATE sovd_server_lib sovd_config_loader ${SOVD_ADAPTER_LIBS})
 
+# --- client SDK (Phase 5): typed wrappers, RAII locks, retry/backoff ---
+add_library(sovd_client STATIC
+    client/src/sovd_client.cpp
+    client/src/lock_guard.cpp
+)
+target_include_directories(sovd_client PUBLIC client/include third_party)
+target_link_libraries(sovd_client PUBLIC Threads::Threads)
+if(SOVD_CLIENT_MDNS)
+    target_sources(sovd_client PRIVATE client/src/mdns_discovery.cpp)
+    target_link_libraries(sovd_client PUBLIC ${AVAHI_CLIENT_LIBRARIES})
+    target_include_directories(sovd_client PUBLIC ${AVAHI_CLIENT_INCLUDE_DIRS})
+    target_compile_definitions(sovd_client PUBLIC SOVD_HAVE_MDNS=1)
+
+    add_library(sovd_mdns_advertise STATIC server/src/mdns_advertise.cpp)
+    target_include_directories(sovd_mdns_advertise PUBLIC server/include)
+    target_link_libraries(sovd_mdns_advertise PUBLIC ${AVAHI_CLIENT_LIBRARIES})
+    target_include_directories(sovd_mdns_advertise PRIVATE ${AVAHI_CLIENT_INCLUDE_DIRS})
+    target_compile_definitions(sovd_mdns_advertise PUBLIC SOVD_HAVE_MDNS=1)
+endif()
+
+add_executable(sovd_cli cli/src/main.cpp)
+target_link_libraries(sovd_cli PRIVATE sovd_client)
+if(SOVD_CLIENT_MDNS)
+    target_compile_definitions(sovd_cli PRIVATE SOVD_HAVE_MDNS=1)
+endif()
+
+if(SOVD_CLIENT_MDNS)
+    target_link_libraries(sovd_server PRIVATE sovd_mdns_advertise)
+    target_compile_definitions(sovd_server PRIVATE SOVD_HAVE_MDNS=1)
+endif()
+
 # --- tests ---
 enable_testing()
 add_executable(test_core tests/test_core.cpp)
@@ -116,3 +158,10 @@ if(SOVD_ADAPTER_UDS_DOIP)
     target_compile_definitions(test_uds_doip PRIVATE SOVD_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     add_test(NAME test_uds_doip COMMAND test_uds_doip)
 endif()
+
+# Client SDK tests: real SovdClient against a real live sovd_server (mock
+# topology), same "test the real path" standard as the rest of this repo.
+add_executable(test_client tests/test_client.cpp)
+target_include_directories(test_client PRIVATE tests adapters/mock)
+target_link_libraries(test_client PRIVATE sovd_client sovd_server_lib sovd_catalog ${SOVD_ADAPTER_LIBS} Threads::Threads)
+add_test(NAME test_client COMMAND test_client)

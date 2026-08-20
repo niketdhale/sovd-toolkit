@@ -88,6 +88,8 @@ private:
     void handle_post_operation(const httplib::Request &req, httplib::Response &res, const std::string &path,
                                 const std::string &op);
     void handle_post_lock(const httplib::Request &req, httplib::Response &res, const std::string &path);
+    void handle_put_lock(const httplib::Request &req, httplib::Response &res, const std::string &path,
+                          const std::string &lock_id);
     void handle_delete_lock(const httplib::Request &req, httplib::Response &res, const std::string &path,
                              const std::string &lock_id);
     void handle_get_docs(const httplib::Request &req, httplib::Response &res, const std::string &path);

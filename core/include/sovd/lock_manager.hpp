@@ -15,6 +15,7 @@ namespace sovd {
 using SteadyClock = std::function<std::chrono::steady_clock::time_point()>;
 
 enum class LockReleaseResult { Released, NotFound, WrongId };
+enum class LockRenewResult { Renewed, NotFound, WrongId };
 
 class LockManager {
 public:
@@ -24,6 +25,13 @@ public:
     std::optional<std::string> acquire(const std::string &entity_path, int ttl_seconds);
 
     LockReleaseResult release(const std::string &entity_path, const std::string &lock_id);
+
+    // Phase 5: extends an already-held lock's TTL without changing its id —
+    // what the client SDK's RAII lock heartbeat calls at ttl/2. Fails the
+    // same two ways release() does (NotFound covers "never locked" and
+    // "expired": the caller can't tell those apart from the outside, and
+    // doesn't need to — both mean "you don't hold it, stop heartbeating").
+    LockRenewResult renew(const std::string &entity_path, const std::string &lock_id, int ttl_seconds);
 
     // true if the entity is unlocked, or locked with lock_id == supplied_lock_id.
     bool check_lock(const std::string &entity_path, const std::string &supplied_lock_id) const;

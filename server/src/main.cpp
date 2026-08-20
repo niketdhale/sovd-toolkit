@@ -12,6 +12,10 @@
 #include "sovd/server/mqtt_publisher.hpp"
 #include "sovd/server/routes.hpp"
 
+#ifdef SOVD_HAVE_MDNS
+#include "sovd/server/mdns_advertise.hpp"
+#endif
+
 using namespace sovd;
 
 namespace {
@@ -110,6 +114,17 @@ int main(int argc, char **argv) {
         router.set_telemetry_sink([telemetry_pub](const std::string &line) { telemetry_pub->publish(line); });
         std::cout << "MQTT event/telemetry publishing to " << mqtt_host << ":" << mqtt_port << std::endl;
     }
+
+    // mDNS advertising is opt-in the same way MQTT is -- unset means no
+    // avahi traffic at all, so `./sovd_server` still runs on a box with no
+    // avahi-daemon (or a build without SOVD_CLIENT_MDNS) unchanged.
+#ifdef SOVD_HAVE_MDNS
+    std::unique_ptr<sovd::server::MdnsAdvertiser> mdns_advertiser;
+    if (std::getenv("SOVD_MDNS_ADVERTISE")) {
+        mdns_advertiser = std::make_unique<sovd::server::MdnsAdvertiser>(server_id, static_cast<uint16_t>(port));
+        std::cout << "advertising _sovd._tcp.local as " << server_id << std::endl;
+    }
+#endif
 
     std::cout << "sovd_server listening on :" << port << " role=" << role << " id=" << server_id << std::endl;
     if (!svr.listen("0.0.0.0", port)) {

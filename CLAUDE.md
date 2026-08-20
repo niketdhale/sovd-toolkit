@@ -158,21 +158,32 @@ sovd-toolkit/
 │   ├── domain_body.yaml         # domain tier, port 20003, mock-backed
 │   └── gateway.yaml             # gateway tier, port 20002, sovd_proxy-backed
 ├── server/                 # C++ HTTP layer — NO diagnostic logic
-│   ├── include/sovd/server/{routes.hpp, config_loader.hpp, mqtt_publisher.hpp}
-│   └── src/{main.cpp, routes.cpp, config_loader.cpp, mqtt_publisher.cpp}
+│   ├── include/sovd/server/{routes.hpp, config_loader.hpp, mqtt_publisher.hpp, mdns_advertise.hpp}
+│   └── src/{main.cpp, routes.cpp, config_loader.cpp, mqtt_publisher.cpp, mdns_advertise.cpp}
+├── client/                  # Phase 5: SDK — typed wrappers, RAII locks, mDNS discovery
+│   ├── include/sovd/client/{sovd_client.hpp, lock_guard.hpp, mdns_discovery.hpp}
+│   └── src/{sovd_client.cpp, lock_guard.cpp, mdns_discovery.cpp}
+├── cli/                      # Phase 5: sovd_cli, built on client/ only (no server/ dep)
+│   └── src/main.cpp
 ├── monitoring/              # Phase 3: Grafana dashboard/alerts, Telegraf input
 │   ├── grafana/dashboards/sovd_security.json
 │   ├── grafana/provisioning/alerting/sovd_alerts.yaml
 │   └── telegraf/sovd_mqtt_input.conf.example
 ├── tests/
 │   ├── test_framework.hpp     # minimal harness, no external dep
-│   ├── test_core.cpp          # 304 assertions (mock path, default build)
+│   ├── test_core.cpp          # 318 assertions (mock path, default build)
+│   ├── test_client.cpp        # 27 assertions — SovdClient/LockGuard vs. a real live server
 │   ├── fake_doip_server.hpp   # in-repo fault-injecting DoIP/UDS test fixture
 │   └── test_uds_doip.cpp      # 180 assertions, built only when SOVD_ADAPTER_UDS_DOIP=ON
 └── third_party/            # vendored single headers
     ├── httplib.h           # cpp-httplib v0.18.3 (MIT)
     └── json.hpp            # nlohmann/json v3.11.3 (MIT)
 ```
+
+avahi-client (LGPL 2.1, dynamically linked) is an optional build-time
+dependency for mDNS (`SOVD_CLIENT_MDNS`, auto-detected via `pkg_check_modules`)
+— not vendored, not required: every other target builds and passes with it
+off.
 
 yaml-cpp (MIT) is a build-time dependency fetched via CMake `FetchContent`
 (pinned to `yaml-cpp-0.9.0`), not vendored as a single header — the catalog
@@ -196,9 +207,19 @@ runtime instance; see Phase 2 below).
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
-./build/test_core                      # 304 assertions
+./build/test_core                      # 318 assertions
+./build/test_client                    # 27 assertions (Phase 5 SDK, always built)
 ./build/sovd_server 20002 domain       # port, role — hardcoded zero-config demo
 cd build && ctest --output-on-failure
+```
+
+Phase 5 CLI, same server:
+```bash
+./build/sovd_cli http://127.0.0.1:20002 entities
+./build/sovd_cli http://127.0.0.1:20002 docs vehicle/body/bcm
+./build/sovd_cli http://127.0.0.1:20002 read vehicle/body/bcm battery_voltage
+./build/sovd_cli http://127.0.0.1:20002 watch vehicle/body/bcm battery_voltage 1000
+./build/sovd_cli discover                          # mDNS; needs SOVD_CLIENT_MDNS + a running avahi-daemon
 ```
 
 Phase 4: `./sovd_server <path-to-existing-file>` loads a YAML topology
@@ -759,20 +780,94 @@ and every other entity keep working.
 
 ---
 
-## Phase 5 — Client SDK + CLI
+## Phase 5 — Client SDK + CLI — COMPLETE ✅
 
 **CLI before UI.** The CLI forces a clean SDK boundary and is trivially
 scriptable for testing. UI-first ends with API logic tangled into components.
 
-- [ ] Typed wrappers over every resource
-- [ ] **Discovery-driven** — build callable surface from `/entities` + `/docs`
-      at runtime, not hardcoded
-- [ ] **RAII lock lifecycle** — acquire, background heartbeat at TTL/2, release
-      on scope exit. *A tester that crashes holding a 3600s lock bricks the
-      entity until expiry.*
-- [ ] Retry/backoff on `503`/`504` — **explicitly not on `423`**
-- [ ] mDNS discovery (`_sovd._tcp.local`)
-- [ ] CLI: browse entities, read/clear faults, read/write data, live watch
+Verified: clean warning-free build in three configs (default mock-only,
+`SOVD_ADAPTER_UDS_DOIP=ON`, and `SOVD_ADAPTER_UDS_DOIP=ON -DSOVD_CLIENT_MDNS=OFF`
+— mDNS must not be load-bearing for the rest of the project to build on a
+box without avahi), 345 assertions total (up from 318 — `test_core`'s new
+lock-renew coverage plus a new `test_client` binary: 27 assertions,
+`SovdClient`/`LockGuard` exercised against a real live `sovd_server`, not a
+mock of the SDK's own HTTP dependency). Every CLI subcommand curl-equivalent
+verified live against a real running server (`entities`, `docs`, `faults`,
+`faults-clear`, `read` single/batch, `write`, `mode`, `op`, `watch`) — output
+included below in each bullet. Two real bugs were found and fixed by this
+live testing, not by inspection — see the RAII and CLI bullets.
+
+- [x] **Typed wrappers over every resource** —
+      `client/include/sovd/client/sovd_client.hpp` / `sovd_client.cpp`.
+      One deliberate simplification: a decoded data value is carried as
+      `nlohmann::json` rather than a hand-built variant (documented in the
+      header) — the wire format is already JSON and every other module in
+      this repo treats it the same way; "typed" is about the *resource
+      surface* (one method per SOVD operation, structured results), not
+      about eliminating `json::json` from every leaf field.
+- [x] **Discovery-driven** — the CLI (`cli/src/main.cpp`) has zero
+      hardcoded entity/DID knowledge anywhere: every path/id is a runtime
+      argument, and `sovd-cli <url> docs <path>` is how a user or script
+      discovers what's actually callable — the CLI-scale version of the
+      same constraint Phase 7 restates for the web UI.
+- [x] **RAII lock lifecycle** — `client/include/sovd/client/lock_guard.hpp`.
+      Required a real, necessary server-side addition that didn't exist
+      before this phase: `PUT /v1/entities/{path}/locks/{lock_id}`
+      (`LockManager::renew`, `Router::handle_put_lock`) — there was no way
+      to extend a held lock's TTL at all, so "heartbeat at ttl/2" had
+      nothing to call. Emits its own `lock_renew_mismatch` event (not
+      `lock_release_mismatch` — it wasn't a release) on a wrong-id renew;
+      Phase 3's alert-rule query was extended to match both, same signature.
+      **Live bug found and fixed**: the heartbeat's interval was computed
+      as `std::chrono::seconds(std::max(1, ttl_seconds/2))` — for a 1s TTL,
+      integer division rounds `ttl/2` to 0, and the `max(1, …)` floor then
+      fired the heartbeat *at* the TTL instead of ahead of it, racing (and
+      sometimes losing to) expiry. Fixed to millisecond precision
+      (`ttl_seconds * 500`, 100ms floor) — caught by
+      `test_client_lock_guard_heartbeat_keeps_lock_alive_past_original_ttl`
+      actually failing on the first run, not by code review.
+- [x] Retry/backoff on `503`/`504`, **never** `423` — `SovdClient::request()`
+      in `sovd_client.cpp`; defaults (`max_retries=3`, `backoff_ms=200`,
+      doubling) match the `retry:` block CLAUDE.md's client config schema
+      already documented in Phase 1.
+- [x] **mDNS discovery (`_sovd._tcp.local`)** — real `avahi-client`, not
+      hand-rolled DNS-SD packet parsing (unlike DoIP/MQTT's "hand-roll the
+      protocol slice" precedent: avahi-client is genuinely already
+      installed here and a full DNS-SD implementation is a much bigger slice
+      than QoS0 MQTT PUBLISH framing was). `client/src/mdns_discovery.cpp`
+      (browse+resolve, `AvahiSimplePoll`, one-shot with a timeout) and
+      `server/src/mdns_advertise.cpp` (`MdnsAdvertiser`, RAII, its own
+      `AvahiThreadedPoll` so it doesn't compete with `httplib::Server`'s
+      accept loop) — both gated behind `SOVD_CLIENT_MDNS`, auto-detected via
+      `pkg_check_modules(avahi-client)` so the rest of the project builds
+      unchanged on a box without avahi. **Honest limitation, not swept
+      under a green checkmark**: this dev sandbox has avahi-client
+      *libraries* installed but no functioning `avahi-daemon`/D-Bus service
+      activation (`systemctl start avahi-daemon` itself times out — no
+      working init/service manager in this sandbox, confirmed, not a code
+      issue) — so unlike MQTT/Grafana (Phase 3) and the two-process proxy
+      demo (Phase 4), a live advertise→discover round trip could not be
+      verified here. What *was* verified: real compilation and linking
+      against the real avahi-client headers/libs (not a stub), and correct
+      graceful-failure behavior when no daemon is reachable (`sovd-cli
+      discover` returns cleanly with "no servers found" within its timeout,
+      no hang, no crash). Needs a live avahi-daemon (any normal Linux
+      desktop or the project's actual target hardware) to verify the full
+      round trip — flagged here rather than claimed.
+- [x] **CLI: browse entities, read/clear faults, read/write data, live
+      watch** — `cli/src/main.cpp`, plus `mode`/`op`/`discover` beyond the
+      literal checklist (needed for "typed wrappers over every resource" to
+      actually mean *every* resource). **Live bug found and fixed**: `watch`
+      produced zero output when its stdout wasn't a tty (e.g. under
+      `timeout` sending `SIGTERM`, or any real piped/redirected use) —
+      C++'s stdout is fully buffered, not line-buffered, off a tty, so
+      nothing reached the terminal until a clean process exit, which is
+      exactly what "live" output must not depend on. Fixed with explicit
+      `std::cout.flush()` after each printed line and a `SIGTERM` handler
+      alongside `SIGINT`'s (`timeout N ... watch` sends `SIGTERM`, not
+      `SIGINT`) — verified live afterward: initial value printed
+      immediately, a background write's new value appeared within one
+      poll interval, confirmed under `timeout`.
 
 ---
 

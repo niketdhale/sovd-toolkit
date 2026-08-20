@@ -46,6 +46,20 @@ LockReleaseResult LockManager::release(const std::string &entity_path, const std
     return LockReleaseResult::Released;
 }
 
+LockRenewResult LockManager::renew(const std::string &entity_path, const std::string &lock_id, int ttl_seconds) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!locked_unexpired(entity_path)) {
+        locks_.erase(entity_path); // purge a stale expired entry, if any
+        return LockRenewResult::NotFound;
+    }
+    auto it = locks_.find(entity_path);
+    if (it->second.lock_id != lock_id) {
+        return LockRenewResult::WrongId;
+    }
+    it->second.expires_at = clock_() + std::chrono::seconds(ttl_seconds);
+    return LockRenewResult::Renewed;
+}
+
 bool LockManager::check_lock(const std::string &entity_path, const std::string &supplied_lock_id) const {
     std::lock_guard<std::mutex> lk(mtx_);
     if (!locked_unexpired(entity_path)) return true;

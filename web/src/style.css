@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+}
+
+/* Shared component classes, Tailwind Plus's own conventions (rounded-md,
+   shadow-xs, ring-1 ring-inset, focus-visible outlines) -- kept here as one
+   place instead of repeating the same long utility strings in every view.
+   Tailwind v4 can't @apply one custom component class from inside another
+   (only real utilities / @utility-defined ones), so each variant class
+   below carries its own full declaration and templates combine two classes
+   (e.g. class="btn btn-primary") rather than one variant class inheriting
+   another's @apply. */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm font-semibold shadow-xs transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply bg-indigo-600 text-white hover:bg-indigo-500 focus-visible:outline-indigo-600;
+  }
+  .btn-secondary {
+    @apply bg-white text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50 focus-visible:outline-indigo-600 dark:bg-white/10 dark:text-white dark:ring-white/10 dark:hover:bg-white/20;
+  }
+  .btn-danger {
+    @apply bg-red-600 text-white hover:bg-red-500 focus-visible:outline-red-600;
+  }
+
+  .card {
+    @apply rounded-xl border border-gray-200 bg-white shadow-xs dark:border-white/10 dark:bg-gray-900;
+  }
+
+  .field {
+    @apply block rounded-md bg-white px-3 py-1.5 text-sm text-gray-900 outline outline-1 -outline-offset-1 outline-gray-300 placeholder:text-gray-400 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-600 dark:bg-white/5 dark:text-white dark:outline-white/10;
+  }
+
+  .badge {
+    @apply inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset;
+  }
+  .badge-green {
+    @apply bg-green-50 text-green-700 ring-green-600/20 dark:bg-green-500/10 dark:text-green-400 dark:ring-green-500/20;
+  }
+  .badge-gray {
+    @apply bg-gray-50 text-gray-600 ring-gray-500/10 dark:bg-gray-400/10 dark:text-gray-400 dark:ring-gray-400/20;
+  }
+  .badge-amber {
+    @apply bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-400/10 dark:text-amber-400 dark:ring-amber-400/20;
+  }
+  .badge-red {
+    @apply bg-red-50 text-red-700 ring-red-600/10 dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20;
+  }
+  .badge-indigo {
+    @apply bg-indigo-50 text-indigo-700 ring-indigo-700/10 dark:bg-indigo-400/10 dark:text-indigo-400 dark:ring-indigo-400/30;
+  }
+}

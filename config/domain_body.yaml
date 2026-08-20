@@ -8,6 +8,11 @@ server:
   id: sovd-body-domain
   port: 20003
   role: domain
+  # Phase 7 (B2): lets the web/ dev server (npm run dev, default Vite port)
+  # talk to this domain server directly -- D1 settled on the UI pointing at
+  # a domain server, not the gateway. Explicit allow-list, never "*".
+  cors_allowed_origins:
+    - http://localhost:5173
 
 entities:
   - path: vehicle

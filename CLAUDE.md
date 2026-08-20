@@ -13,8 +13,14 @@ every documented configuration, including the previously-broken
 `-DSOVD_ADAPTER_MOCK=OFF -DSOVD_ADAPTER_UDS_DOIP=ON` restricted combination
 (B3, fixed).
 
-**B1, B2, and B3 are all DONE (2026-08-20).** All three open decisions are
-settled. Nothing left blocking Phase 7 UI code — the four screens can start.
+**B1, B2, and B3 are all DONE. Phase 7 (Vue web UI, all four screens) is
+built (2026-08-20)** — `web/`, Vue 3 + Vite + Tailwind, pointed at a domain
+server per D1, typed widgets from `/docs` per B1, CORS per B2, 10s
+lock-heartbeat lifecycle per D3. `npm run build` type-checks clean and every
+API call pattern was verified live with curl against a real server, but
+**no browser automation was available to visually exercise the rendered
+UI** — that's the one remaining check before calling this fully done, not
+just built. Phase 8 (hardening) is next and hasn't started.
 
 ### Blockers (server-side, must land before UI code)
 | id | What | Blocks | Where it's specified |
@@ -264,6 +270,10 @@ sovd-toolkit/
 │   ├── grafana/dashboards/sovd_security.json
 │   ├── grafana/provisioning/alerting/sovd_alerts.yaml
 │   └── telegraf/sovd_mqtt_input.conf.example
+├── web/                      # Phase 7: Vue 3 + Vite + Tailwind UI, own npm project
+│   ├── src/api/sovdClient.ts        # discovery-driven, retry/backoff, mirrors client/'s SDK shape
+│   ├── src/composables/useLock.ts   # D3: 10s TTL + heartbeat + beforeunload
+│   └── src/views/{EntityBrowser,FaultViewer,DataTable,LiveChart}.vue
 ├── tests/
 │   ├── test_framework.hpp     # minimal harness, no external dep
 │   ├── test_core.cpp          # 342 assertions (mock path, default build)
@@ -1046,11 +1056,27 @@ first two bullets.
 
 ---
 
-## Phase 7 — Web UI
+## Phase 7 — Web UI — COMPLETE ✅ (pending a human's visual pass)
 
 **Design constraint: ZERO knowledge of any specific ECU.** Every control
 rendered from `/docs`. Hardcoding DIDs in the frontend throws away the thing
 that makes SOVD better than ODX.
+
+Verified: `npm run build` (`vue-tsc -b && vite build`) compiles clean, zero
+type errors. No browser automation was available in the session that built
+this, so **every API call pattern each screen makes was verified live with
+curl** using the real `Origin: http://localhost:5173` header against a real
+running domain server instead — version discovery (`GET /`), `/docs`, batch
+read, the full lock/heartbeat/renew/release cycle with a typed enum write
+riding on it, and the SSE stream with its CORS headers — and the Vite dev
+server itself confirmed serving `index.html` and every `.vue`/`.ts` module
+in the graph with no transform errors. **The actual rendered UI has not
+been visually exercised in a real browser** (layout, click-through, console
+errors) — flagged here rather than claimed, matching this project's own
+standard (Phase 5/6 found real bugs specifically by running things live;
+this phase couldn't complete that same step). Both `sovd_server
+config/domain_body.yaml` and `npm run dev` were left running for a human
+to check at <http://localhost:5173>.
 
 ### ⚠ BLOCKERS — server-side work that must land BEFORE any UI code
 
@@ -1122,39 +1148,62 @@ them. **Do these first, in this order.**
       domain server directly, so this doesn't bite screen 4). Constraint
       originates in Phase 6; repeated here because nobody building the UI
       reads Phase 6.
-- [ ] **Discover the API version, don't hardcode `/v1/`** — `/` is
-      deliberately unversioned so a client can read `api_versions` before it
-      knows which prefix to use (see the settled versioning decision). The UI
-      should hit `/` first and build its base path from the response.
-      Hardcoding `/v1/` in the frontend wastes the entire versioning
-      decision on the one surface most likely to outlive a version bump.
+- [x] **Discover the API version, don't hardcode `/v1/`** —
+      `SovdClient.ensureApiBase()` (`web/src/api/sovdClient.ts`) hits `/`
+      once, reads `api_versions[0]`, and builds every subsequent call from
+      that; no `/v1/` literal anywhere else in the frontend. Live-verified
+      via curl exactly as the client does it.
 - [x] **Browser lock lifecycle** — see **D3** above (settled: 10s TTL + JS
-      heartbeat + best-effort `beforeunload`). Affects screen 3.
-- [ ] **Error verbosity by role may fire in THIS phase, not Phase 8** —
-      Phase 3 correctly deferred it because nothing leaks today (every
-      `write_error()` emits a fixed generic string; the vtable returns only a
-      `sovd_result_t`). But a *technician-facing* UI is precisely the surface
-      that will want descriptive NRC text from `adapters/uds_doip/nrc_map`
-      surfaced in error messages. **The moment that text is threaded up into
-      an HTTP response, the role-based filter has to exist** — Phase 3's
-      "revisit when the response schema changes" trigger is likely to be hit
-      here. Don't thread NRC detail up without adding the filter in the same
-      change.
+      heartbeat + best-effort `beforeunload`). `web/src/composables/
+      useLock.ts`. One real design point: it takes a *getter* for the
+      entity path, not a static string — Vue's `onUnmounted` can only be
+      registered once per component, but the entity being locked (screen
+      3's selected path) can change across the composable's lifetime, so
+      `useLock()` itself is called once at `setup()` and always reads
+      `getPath()` fresh when `acquire()`/`release()` run; `DataTable.vue`
+      forces a `release()` via a `watch` before the path changes under it.
+      **Not every lock in this UI uses `useLock`**: the fault-clear button
+      is a one-shot acquire→DELETE→release within a single click, matching
+      the CLI's own `faults-clear` (`heartbeat=false`) — a heartbeat has
+      nothing to do across a sub-second round trip; `useLock`'s heartbeat
+      machinery is specifically for screen 3's held-open edit sessions.
+- [ ] **Error verbosity by role** — not touched. No NRC detail was threaded
+      into any HTTP response in this phase (every error the UI shows is
+      whatever generic string `routes.cpp` already emitted), so per Phase
+      3's own resolution this still isn't needed yet — noted, not
+      silently skipped.
 
 ### The UI itself
 
-- [ ] Stack: Vue 3 + Vite + Tailwind (reuse Verso patterns; don't rebuild a
-      design system — value is functional, not aesthetic)
-- [ ] **Hosted separately from the vehicle**, CORS-configured API (B2).
-      Serving static files from a safety-adjacent gateway adds attack surface
-      and TLS pain for no benefit.
-- [ ] Budget time for: self-signed cert warnings, mixed content, inconsistent
-      browser mDNS `.local` resolution
+- [x] Stack: Vue 3 + Vite + Tailwind — `web/`. Tailwind 4's Vite plugin
+      (`@tailwindcss/vite`), no separate `postcss.config`/`tailwind.config`
+      needed. No Verso source was available to actually reuse in this
+      session; Tailwind utility classes only, no custom design system,
+      matching "value is functional, not aesthetic." No router, no state
+      library (Pinia/Vuex), no charting library, no HTTP client library —
+      four screens sharing a little state fit in plain `ref`s and native
+      `fetch`/`EventSource`; adding any of those would be solving a
+      problem this UI doesn't have.
+- [x] **Hosted separately from the vehicle**, CORS-configured API (B2) —
+      `web/` is its own Vite project/dev-server/build, no static files
+      served from `sovd_server` at all. `config/domain_body.yaml` carries
+      `cors_allowed_origins: [http://localhost:5173]` (Vite's default port)
+      so the existing two-tier demo config just works with `npm run dev`
+      out of the box.
+- [ ] Self-signed cert warnings / mixed content / mDNS `.local` resolution
+      — not applicable to this session's plain-`http://localhost` setup;
+      genuinely deferred to whoever deploys this against a real TLS
+      endpoint, not silently dropped.
 
-**Scope: four screens, then STOP.** (1) entity browser, (2) fault viewer
-read/clear, (3) data table read/write with typed widgets from catalog
-(needs B1), (4) live chart via SSE (needs B2 verified for `EventSource`, and
-D1 settled).
+**Scope: four screens, then STOP — delivered.** `web/src/views/`:
+`EntityBrowser.vue` (1), `FaultViewer.vue` (2, read + status filter +
+clear), `DataTable.vue` (3, typed widgets purely from `item.type`/
+`item.access`/`item.values` — an enum `<select>`, a `<input type=number>`
+with its unit shown, a text input capped at `item.length` for a bounded
+string, nothing hardcoded per-entity), `LiveChart.vue` (4, native
+`EventSource`, a hand-rolled SVG polyline for a float item since one screen
+doesn't justify a charting dependency, a scrolling text log for anything
+else streamed).
 *Update orchestration and OTX UIs are where projects go to die.*
 
 ---
@@ -1278,15 +1327,17 @@ D1 settled).
 
 Phases 1 → 2 → 3 were the credible, finishable core — **done**.
 Phases 4 → 6 made it architecturally serious — **done**.
-Phases 7 → 8 are polish and production posture — **remaining**.
+Phase 7 is built; Phase 8 is polish and production posture — **remaining**.
 
 **Immediate sequence from here:**
 1. ~~Settle **D1**, **D2**, **D3**~~ — **done**, see OPEN DECISIONS above
 2. ~~**B1** catalog `encode()` + validation~~ — **done**
 3. ~~**B2** CORS, with SSE verified separately via `EventSource`~~ — **done**
 4. ~~**B3** restricted-build fix~~ — **done**
-5. Phase 7 screens 1 → 2 → 3 → 4, in that order (1 and 2 need no blockers, so
-   they can start as soon as B2 lands)
+5. ~~Phase 7 screens 1 → 2 → 3 → 4~~ — **built, 2026-08-20**; give it a real
+   browser pass (visual/click-through) before treating it as fully verified,
+   not just built — no browser automation was available in the session that
+   wrote it
 6. Phase 8, restricted build first
 
 For interviews, Phases 1, 3, and 6 show understanding of *why* SOVD exists

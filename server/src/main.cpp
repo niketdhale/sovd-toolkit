@@ -88,24 +88,26 @@ int main(int argc, char **argv) {
 
     EntityRegistry registry;
     LockManager locks;
-    httplib::Server svr;
-    // Phase 8: max request body -- native httplib feature (rung 4: don't
-    // hand-roll what the platform already does), not opt-in like MQTT/CORS
-    // since this is a security property, not a demo convenience. Every
-    // legitimate SOVD write body is a few bytes of JSON ({"value": ...});
-    // 64KiB is generous headroom, not a real ceiling on anything valid.
-    svr.set_payload_max_length(64 * 1024);
 
     // Router needs a server_id/role at construction, but in config mode
     // those only become known once load_topology_from_file() below has
     // parsed the `server:` block -- placeholders here, corrected via
-    // set_server_id()/set_role() before svr.listen() starts accepting
+    // set_server_id()/set_role() before svr->listen() starts accepting
     // requests (see routes.hpp's comment on those setters).
     std::string server_id = "sovd-demo";
     std::string role = "domain";
     int port = 20002;
     sovd::server::Router router(registry, locks, server_id, role);
-    router.register_routes(svr);
+
+    // Phase 8 (mTLS): empty means plain HTTP -- decided below, once
+    // load_topology_from_file() (config mode) or the env vars (hardcoded
+    // demo mode) have had a chance to set them, and used to pick between
+    // httplib::Server and httplib::SSLServer before anything binds a port.
+    // register_routes()/set_payload_max_length() don't care which one they
+    // get (SSLServer derives from Server), so svr itself is constructed
+    // after this decision instead of before it, unlike the pre-Phase-8
+    // shape where a single plain Server was created up front.
+    std::string tls_cert, tls_key, tls_client_ca;
 
     if (config_mode) {
         try {
@@ -113,6 +115,9 @@ int main(int argc, char **argv) {
             server_id = cfg.id;
             role = cfg.role;
             port = cfg.port;
+            tls_cert = cfg.tls_cert;
+            tls_key = cfg.tls_key;
+            tls_client_ca = cfg.tls_client_ca;
             router.set_server_id(server_id);
             router.set_role(role);
         } catch (const sovd::server::ConfigError &ex) {
@@ -133,6 +138,14 @@ int main(int argc, char **argv) {
         } catch (const catalog::CatalogError &ex) {
             std::cerr << "warning: failed to load catalogs/bcm.yaml: " << ex.what() << std::endl;
         }
+
+        // Phase 8 (mTLS): same opt-in-via-env-var shape as CORS/OAuth2/the
+        // audit log for the hardcoded demo path -- unset means plain HTTP,
+        // so `./sovd_server` still runs exactly as before with no config
+        // file.
+        if (const char *cert = std::getenv("SOVD_TLS_CERT")) tls_cert = cert;
+        if (const char *key = std::getenv("SOVD_TLS_KEY")) tls_key = key;
+        if (const char *client_ca = std::getenv("SOVD_TLS_CLIENT_CA")) tls_client_ca = client_ca;
     }
 
     // MQTT is opt-in via env var regardless of mode — unset means stdout,
@@ -226,8 +239,36 @@ int main(int argc, char **argv) {
     }
 #endif
 
+    // Phase 8 (mTLS): decided last, once every source of tls_cert/tls_key/
+    // tls_client_ca (config YAML or env vars) has had its say. SSLServer
+    // derives from Server, so router.register_routes(*svr) below doesn't
+    // need to know which one it got. client_ca present => mutual TLS: the
+    // domain server requires and verifies the gateway's client certificate
+    // (CLAUDE.md: "must verify the gateway's certificate, not trust a
+    // forwarded external bearer token") rather than merely offering TLS.
+    std::unique_ptr<httplib::Server> svr;
+    if (!tls_cert.empty() && !tls_key.empty()) {
+        svr = std::make_unique<httplib::SSLServer>(tls_cert.c_str(), tls_key.c_str(),
+                                                    tls_client_ca.empty() ? nullptr : tls_client_ca.c_str());
+        if (!svr->is_valid()) {
+            std::cerr << "failed to load TLS cert/key (" << tls_cert << " / " << tls_key << ")" << std::endl;
+            return 1;
+        }
+        std::cout << "TLS enabled" << (tls_client_ca.empty() ? "" : ", requiring client certificates (mutual TLS)")
+                   << std::endl;
+    } else {
+        svr = std::make_unique<httplib::Server>();
+    }
+    // Phase 8: max request body -- native httplib feature (rung 4: don't
+    // hand-roll what the platform already does), not opt-in like MQTT/CORS
+    // since this is a security property, not a demo convenience. Every
+    // legitimate SOVD write body is a few bytes of JSON ({"value": ...});
+    // 64KiB is generous headroom, not a real ceiling on anything valid.
+    svr->set_payload_max_length(64 * 1024);
+    router.register_routes(*svr);
+
     std::cout << "sovd_server listening on :" << port << " role=" << role << " id=" << server_id << std::endl;
-    if (!svr.listen("0.0.0.0", port)) {
+    if (!svr->listen("0.0.0.0", port)) {
         std::cerr << "failed to bind port " << port << std::endl;
         return 1;
     }

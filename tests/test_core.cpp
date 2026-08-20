@@ -360,6 +360,13 @@ data:
     access: read_write
     io_control: true
 
+  - id: secure_setting
+    did: 0x0300
+    type: string
+    length: 8
+    access: read_write
+    requires_security_level: 1
+
 operations:
   - id: self_test
     routine_id: 0x0203
@@ -369,7 +376,7 @@ operations:
 
 void test_catalog_parses_data_and_operations() {
     Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
-    ASSERT_EQ(cat.data().size(), static_cast<size_t>(3));
+    ASSERT_EQ(cat.data().size(), static_cast<size_t>(4)); // vin, battery_voltage, door_lock_state, secure_setting
     ASSERT_EQ(cat.operations().size(), static_cast<size_t>(1));
 
     const DataItem *vin = cat.find_by_id("vin");
@@ -946,7 +953,7 @@ void test_http_docs_lists_catalog_data_and_operations() {
     json body = json::parse(res->body);
 
     ASSERT_TRUE(body["has_backend"].get<bool>());
-    ASSERT_EQ(body["data"].size(), static_cast<size_t>(3));
+    ASSERT_EQ(body["data"].size(), static_cast<size_t>(4)); // vin, battery_voltage, door_lock_state, secure_setting
     ASSERT_EQ(body["operations"].size(), static_cast<size_t>(1));
 
     bool found_voltage = false;
@@ -1390,6 +1397,40 @@ void test_http_oauth2_valid_token_with_scope_succeeds() {
     ASSERT_EQ(write_res->status, 204);
 }
 
+// Phase 8 (D2): the OAuth2-scope half of SecurityAccess gating.
+// secure_setting (kSampleCatalogYaml) carries requires_security_level: 1 --
+// a plain execute:routines token, sufficient for every other write in this
+// suite, must NOT be enough here; only execute:security_access is.
+void test_http_security_access_scope_gates_write_beyond_execute_routines() {
+    TestServer ts;
+    ts.router.set_oauth2_secret("test-secret");
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    std::string routines_token = sovd::server::oauth2::mint_token("test-secret", {"execute:routines"}, 60);
+    auto denied = cli.Put("/v1/entities/vehicle/body/bcm/data/secure_setting",
+                           httplib::Headers{{"Authorization", "Bearer " + routines_token}}, R"({"value":"abc"})",
+                           "application/json");
+    ASSERT_TRUE(denied != nullptr);
+    ASSERT_EQ(denied->status, 403);
+
+    std::string security_token =
+        sovd::server::oauth2::mint_token("test-secret", {"execute:routines", "execute:security_access"}, 60);
+    auto allowed = cli.Put("/v1/entities/vehicle/body/bcm/data/secure_setting",
+                            httplib::Headers{{"Authorization", "Bearer " + security_token}}, R"({"value":"abc"})",
+                            "application/json");
+    ASSERT_TRUE(allowed != nullptr);
+    ASSERT_EQ(allowed->status, 204);
+
+    // A write to an item with no requires_security_level (door_lock_state)
+    // is unaffected by this gate -- execute:routines alone is still enough,
+    // same as before this item existed.
+    auto unaffected = cli.Put("/v1/entities/vehicle/body/bcm/data/door_lock_state",
+                               httplib::Headers{{"Authorization", "Bearer " + routines_token}},
+                               R"({"value":"locked"})", "application/json");
+    ASSERT_TRUE(unaffected != nullptr);
+    ASSERT_EQ(unaffected->status, 204);
+}
+
 // Pure MQTT packet framing -- no socket, no broker. Matches the
 // doip_protocol precedent: wire-format encode/decode is unit-testable on
 // its own, independent of the transport that carries it.
@@ -1536,6 +1577,74 @@ entities:
         threw = true;
     }
     ASSERT_TRUE(threw);
+}
+
+// Phase 8 (mTLS): live wire-level mTLS enforcement (handshake succeeds with
+// the right client cert, is rejected with none or a wrong-CA one) was
+// verified against real running servers with real openssl-generated certs
+// (see CLAUDE.md's mTLS writeup) -- not reproduced here, since spinning up
+// SSLServer/SSLClient inside the test binary would just be re-testing
+// OpenSSL's own TLS stack. What this suite covers is the piece this
+// project's own code is actually responsible for: that config_loader
+// parses the tls: blocks into the right fields, and validates the one
+// structural requirement (cert+key together) before anything tries to bind.
+void test_config_loader_server_tls_fields_parsed() {
+    EntityRegistry registry;
+    LockManager locks;
+    sovd::server::Router router(registry, locks, "placeholder", "domain");
+    ServerConfig cfg = load_topology_from_string(R"(
+server: {id: x, port: 1, role: domain, tls: {cert: certs/domain.crt, key: certs/domain.key, client_ca: certs/ca.crt}}
+entities:
+  - path: vehicle
+    type: vehicle
+)",
+                                                  registry, router);
+    ASSERT_EQ(cfg.tls_cert, "certs/domain.crt");
+    ASSERT_EQ(cfg.tls_key, "certs/domain.key");
+    ASSERT_EQ(cfg.tls_client_ca, "certs/ca.crt");
+}
+
+void test_config_loader_server_tls_requires_cert_and_key() {
+    EntityRegistry registry;
+    LockManager locks;
+    sovd::server::Router router(registry, locks, "placeholder", "domain");
+    bool threw = false;
+    try {
+        // cert with no key -- can't bind an SSLServer on this alone.
+        load_topology_from_string(R"(
+server: {id: x, port: 1, role: domain, tls: {cert: certs/domain.crt}}
+entities:
+  - path: vehicle
+    type: vehicle
+)",
+                                   registry, router);
+    } catch (const ConfigError &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw);
+}
+
+void test_config_loader_sovd_proxy_tls_block_parses_without_throwing() {
+    EntityRegistry registry;
+    LockManager locks;
+    sovd::server::Router router(registry, locks, "placeholder", "gateway");
+    // Port 1 is never actually dialed: ProxyConnection's httplib::Client
+    // doesn't connect until a request is sent, so this only exercises
+    // parsing + ProxyConnection construction (SSL context setup), matching
+    // this test's narrower scope (see comment above).
+    load_topology_from_string(R"(
+server: {id: x, port: 1, role: gateway}
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/bcm
+    type: component
+    adapter: { kind: sovd_proxy, base_url: "https://127.0.0.1:1", remote_path: vehicle/bcm,
+               tls: {client_cert: certs/gateway_client.crt, client_key: certs/gateway_client.key, ca_cert: certs/ca.crt} }
+)",
+                               registry, router);
+    const Entity *e = registry.find("vehicle/bcm");
+    ASSERT_TRUE(e != nullptr);
 }
 
 // The real Phase 4 exit criterion: two live servers, gateway config-loaded
@@ -1950,6 +2059,7 @@ int main() {
     RUN_TEST(test_http_oauth2_wrong_secret_and_expired_token_rejected);
     RUN_TEST(test_http_oauth2_valid_token_missing_scope_gets_403);
     RUN_TEST(test_http_oauth2_valid_token_with_scope_succeeds);
+    RUN_TEST(test_http_security_access_scope_gates_write_beyond_execute_routines);
 
     RUN_TEST(test_mqtt_encode_connect_packet);
     RUN_TEST(test_mqtt_encode_publish_packet);
@@ -1960,6 +2070,9 @@ int main() {
     RUN_TEST(test_config_loader_rejects_orphan_entity);
     RUN_TEST(test_config_loader_unknown_adapter_kind_falls_back_to_grouping_node);
     RUN_TEST(test_config_loader_sovd_proxy_requires_base_url);
+    RUN_TEST(test_config_loader_server_tls_fields_parsed);
+    RUN_TEST(test_config_loader_server_tls_requires_cert_and_key);
+    RUN_TEST(test_config_loader_sovd_proxy_tls_block_parses_without_throwing);
     RUN_TEST(test_config_loader_proxy_forwards_docs_data_and_locks);
     RUN_TEST(test_http_proxy_bounded_queue_returns_503_on_concurrent_request);
     RUN_TEST(test_config_loader_unreachable_proxy_degrades_gracefully);

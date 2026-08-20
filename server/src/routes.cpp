@@ -284,10 +284,24 @@ bool from_hex(std::string s, std::vector<uint8_t> &out) {
 // LockManager for every lock-gated operation anyway.
 class ProxyConnection {
 public:
-    explicit ProxyConnection(const std::string &base_url) : client(base_url) {
+    // Phase 8 (mTLS): httplib::Client's (url, client_cert_path,
+    // client_key_path) constructor already builds an SSLClient internally
+    // when base_url is https:// -- empty cert/key strings are a no-op for
+    // a plain http:// target, so this one constructor covers both cases
+    // without a separate SSLClient type in this file.
+    explicit ProxyConnection(const ProxyTarget &target)
+        : client(target.base_url, target.tls_client_cert, target.tls_client_key) {
         client.set_connection_timeout(2, 0);
         client.set_read_timeout(5, 0);
         client.set_keep_alive(true);
+        if (!target.tls_ca_cert.empty()) {
+            // Verify the domain server's certificate against this
+            // project's own demo CA, not the system trust store -- these
+            // are self-signed certs, and enable_server_certificate_
+            // verification would otherwise reject them outright.
+            client.set_ca_cert_path(target.tls_ca_cert);
+            client.enable_server_certificate_verification(true);
+        }
     }
 
     httplib::Client client;
@@ -305,6 +319,16 @@ void Router::set_event_sink(EventSink sink) { event_sink_ = std::move(sink); }
 void Router::set_telemetry_sink(EventSink sink) { telemetry_sink_ = std::move(sink); }
 void Router::set_cors_allowed_origins(std::vector<std::string> origins) { cors_allowed_origins_ = std::move(origins); }
 void Router::set_oauth2_secret(std::string secret) { oauth2_secret_ = std::move(secret); }
+
+bool Router::has_oauth2_scope(const httplib::Request &req, const std::string &scope) const {
+    if (oauth2_secret_.empty()) return true;
+    static const std::string prefix = "Bearer ";
+    std::string auth_header = req.get_header_value("Authorization");
+    if (auth_header.size() <= prefix.size() || auth_header.compare(0, prefix.size(), prefix) != 0) return false;
+    sovd::server::oauth2::TokenClaims claims;
+    if (!sovd::server::oauth2::verify_token(auth_header.substr(prefix.size()), oauth2_secret_, claims)) return false;
+    return sovd::server::oauth2::has_scope(claims, scope);
+}
 
 void Router::apply_cors_headers(const httplib::Request &req, httplib::Response &res) const {
     std::string origin = req.get_header_value("Origin");
@@ -489,7 +513,7 @@ void Router::attach_proxy(const std::string &entity_path, ProxyTarget target) {
     // Created here, before svr.listen() starts (config loading is
     // single-threaded), not lazily in try_forward() -- lets try_forward()
     // do a plain, concurrency-safe map lookup with no insertion-time race.
-    proxy_connections_[entity_path] = std::make_unique<ProxyConnection>(target.base_url);
+    proxy_connections_[entity_path] = std::make_unique<ProxyConnection>(target);
     proxies_.insert_or_assign(entity_path, std::move(target));
 }
 
@@ -783,6 +807,19 @@ void Router::handle_put_data(const httplib::Request &req, httplib::Response &res
 
     if (item && item->access == catalog::Access::Read) {
         write_error(res, 400, "BAD_REQUEST", "data item '" + item->id + "' is read-only");
+        return;
+    }
+
+    // Phase 8 (D2): the OAuth2-scope half of SecurityAccess gating -- the
+    // ECU-demand half (uds_doip's ensure_security_for_did, driven by this
+    // same requires_security_level field) runs unconditionally inside the
+    // adapter regardless of what happens here; this is the "is this client
+    // even allowed to ask" check D2 required alongside it.
+    if (item && item->requires_security_level && !has_oauth2_scope(req, "execute:security_access")) {
+        emit_event(event_sink_, "security_access_scope_denied",
+                   {{"entity", path}, {"id", item->id}, {"correlation_id", corr}});
+        write_error(res, 403, "FORBIDDEN",
+                    "token lacks execute:security_access scope required for '" + item->id + "'");
         return;
     }
 

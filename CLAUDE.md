@@ -14,23 +14,40 @@ every documented configuration, including the previously-broken
 (B3, fixed).
 
 **B1, B2, and B3 are all DONE. Phase 7 (Vue web UI, all four screens) is
-built (2026-08-20)** — `web/`, Vue 3 + Vite + Tailwind, pointed at a domain
-server per D1, typed widgets from `/docs` per B1, CORS per B2, 10s
-lock-heartbeat lifecycle per D3. `npm run build` type-checks clean and every
-API call pattern was verified live with curl against a real server, but
-**no browser automation was available to visually exercise the rendered
-UI** — that's the one remaining check before calling this fully done, not
-just built.
+COMPLETE, browser-verified 2026-08-20** — `web/`, Vue 3 + Vite + Tailwind,
+pointed at a domain server per D1, typed widgets from `/docs` per B1, CORS
+per B2, 10s lock-heartbeat lifecycle per D3. `npm run build` type-checks
+clean, every API call pattern was verified live with curl against a real
+server, and — the item this file had flagged as the one remaining
+check — **a real Chromium browser (Playwright MCP) then clicked through all
+four screens against a live `sovd_server config/domain_body.yaml`**: connect
+→ Entities lists all 4 demo entities with correct backend flags → Faults
+shows both seeded faults and the status filter correctly narrows to one →
+Data renders all three catalog items with correct typed widgets (string
+read-only, float read-only with unit, enum as a `<select>`) → Enable
+editing acquires a lock (10s TTL / ~5s heartbeat message shown in the UI,
+confirming D3) → writing `door_lock_state` to `unlocked` succeeds and
+persists after Stop editing releases the lock → Live streaming on
+`battery_voltage` renders the SVG polyline and the value counter advanced
+correctly at the chosen interval. Zero console errors/warnings at any step.
+This session's sandbox had no system Chrome and Playwright's own
+`--with-deps` installer only supports apt (this box is Arch) — resolved by
+installing `chromium` via `pacman`, which happens to already sit at the
+path (`/opt/google/chrome/chrome`) Playwright's default "chrome" channel
+expects, so no MCP config changes were needed.
 
-**Phase 8 (hardening) is in progress, started 2026-08-20.** Done so far:
-default-deny route whitelist at the gateway tier, and all four resource
-limits (entity-tree depth cap, lock TTL ceiling, max-concurrent-locks as the
-UDS-session-cap proxy, max request body) — both live-verified against the
-real two-tier demo, not just unit-tested. 509 assertions in `test_core` (up
-from 381), `test_uds_doip` 180, `test_client` 32 — all passing. Remaining:
-mTLS, OAuth2, SecurityAccess wiring (needs OAuth2 first, per D2), per-adapter
-bounded queue, per-adapter connection pooling, explicit persistence
-write-up.
+**Phase 8 (hardening) is COMPLETE, finished 2026-08-20.** Every item done
+and live-verified: B3 restricted-build fix, default-deny gateway route
+whitelist, all four resource limits (entity-tree depth cap, lock TTL
+ceiling, max-concurrent-locks as the UDS-session-cap proxy, max request
+body), per-adapter connection pooling + bounded proxy queue, explicit audit
+log persistence, OAuth2 bearer-token auth, mutual TLS between gateway and
+domain servers (both directions — client cert required and verified,
+server cert verified against a private demo CA), and SecurityAccess
+(`0x27`) wiring for both D2 halves (catalog `requires_security_level` field
+gating what the ECU demands, `execute:security_access` OAuth2 scope gating
+who may ask). 542 assertions in `test_core` (up from 381), `test_uds_doip`
+197 (up from 180), `test_client` 32 — all passing, all committed.
 
 ### Blockers (server-side, must land before UI code)
 | id | What | Blocks | Where it's specified |
@@ -1066,27 +1083,40 @@ first two bullets.
 
 ---
 
-## Phase 7 — Web UI — COMPLETE ✅ (pending a human's visual pass)
+## Phase 7 — Web UI — COMPLETE ✅
 
 **Design constraint: ZERO knowledge of any specific ECU.** Every control
 rendered from `/docs`. Hardcoding DIDs in the frontend throws away the thing
 that makes SOVD better than ODX.
 
 Verified: `npm run build` (`vue-tsc -b && vite build`) compiles clean, zero
-type errors. No browser automation was available in the session that built
-this, so **every API call pattern each screen makes was verified live with
-curl** using the real `Origin: http://localhost:5173` header against a real
-running domain server instead — version discovery (`GET /`), `/docs`, batch
+type errors. Every API call pattern each screen makes was first verified
+live with curl using the real `Origin: http://localhost:5173` header against
+a real running domain server — version discovery (`GET /`), `/docs`, batch
 read, the full lock/heartbeat/renew/release cycle with a typed enum write
-riding on it, and the SSE stream with its CORS headers — and the Vite dev
-server itself confirmed serving `index.html` and every `.vue`/`.ts` module
-in the graph with no transform errors. **The actual rendered UI has not
-been visually exercised in a real browser** (layout, click-through, console
-errors) — flagged here rather than claimed, matching this project's own
-standard (Phase 5/6 found real bugs specifically by running things live;
-this phase couldn't complete that same step). Both `sovd_server
-config/domain_body.yaml` and `npm run dev` were left running for a human
-to check at <http://localhost:5173>.
+riding on it, and the SSE stream with its CORS headers.
+
+**Browser pass — DONE, 2026-08-20.** The one gap this file flagged (no
+browser automation was available in the session that built this phase) is
+now closed: a real Chromium instance (Playwright MCP) drove the actual
+rendered UI against a live `sovd_server config/domain_body.yaml` +
+`npm run dev`. Walked all four screens end to end — connect, select
+`vehicle/body/bcm`, Entities (all 4 demo entities listed, correct
+`has_backend` flags), Faults (both seeded faults shown, `?status=confirmed`
+filter correctly narrows to one row), Data (all three catalog items with
+correct typed widgets — read-only string/float-with-unit, an enum
+`<select>` for `read_write`), Enable editing (lock acquired, UI shows "lock
+renews every ~5s (10s TTL)" confirming D3 live), writing `door_lock_state`
+to `unlocked` (succeeds, value persists after Stop editing releases the
+lock — confirms the write actually committed server-side, not just local
+UI state), and Live streaming on `battery_voltage` (SVG polyline renders,
+value counter advances at the chosen interval via real SSE). Zero console
+errors or warnings at any step. This sandbox had no system Chrome and
+Playwright's bundled `--with-deps` installer only knows `apt-get` (this box
+is Arch, no apt) — resolved by having the user install `chromium` via
+`pacman`, which lands at `/opt/google/chrome/chrome`, exactly the path
+Playwright's default `chrome` channel already looks for, so no MCP
+server/config changes were needed in the end.
 
 ### ⚠ BLOCKERS — server-side work that must land BEFORE any UI code
 
@@ -1254,9 +1284,65 @@ else streamed).
       wired to require a config file with no ECU-facing adapters linked at
       all) is still unbuilt — this item was specifically the linkage
       breakage blocking it, now cleared.
-- [ ] **mTLS gateway ↔ domain servers** — internal hop must verify the
-      gateway's certificate, **not** trust a forwarded external bearer token
-      (otherwise a leaked token becomes lateral movement)
+- [x] **mTLS gateway ↔ domain servers — DONE, 2026-08-20.** Both
+      directions of mutual TLS, not just "TLS is on": the domain server
+      requires and verifies the gateway's client certificate (`server.tls.
+      client_ca` in the topology YAML → `httplib::SSLServer`'s
+      `client_ca_cert_file_path`, which cpp-httplib wires straight to
+      `SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT` — "verify the
+      gateway's certificate, not trust a forwarded external bearer token"
+      is enforced by OpenSSL itself, not a check this project hand-rolled),
+      and the gateway verifies the domain's server certificate against the
+      same private CA rather than the system trust store (`ProxyTarget`'s
+      `tls_ca_cert` → `httplib::Client::set_ca_cert_path` +
+      `enable_server_certificate_verification(true)`). Both self-signed,
+      demo-only certs — a private CA is exactly what an in-vehicle internal
+      hop should use, never a public one.
+      **Mechanism, not a new one**: cpp-httplib's `Client(url, client_cert_
+      path, client_key_path)` constructor already builds an `SSLClient`
+      internally for an `https://` URL (rung 5 — an already-vendored
+      dependency solves this), so `ProxyConnection` (Phase 8's connection-
+      pooling item) needed only three new `ProxyTarget` fields
+      (`tls_client_cert`, `tls_client_key`, `tls_ca_cert`), not a second
+      client type. Server-side, `main.cpp` now decides `httplib::Server` vs
+      `httplib::SSLServer` (`SSLServer` derives from `Server`, so
+      `register_routes()` doesn't care which it got) once TLS settings are
+      known — a real restructure, not a one-line addition: `svr` used to be
+      constructed *before* config loading (so `register_routes()` could run
+      early), but the TLS cert/key/client_ca only become known *from* that
+      same config load, so svr construction moved to after it.
+      **Config schema**: `server.tls: {cert, key, client_ca}` (domain side,
+      `client_ca` optional — present enables mutual TLS, absent is TLS
+      without client verification) and a proxy adapter's `tls: {client_cert,
+      client_key, ca_cert}` (gateway side). Same opt-in-via-env-var shape
+      for the hardcoded zero-config demo path (`SOVD_TLS_CERT`/
+      `SOVD_TLS_KEY`/`SOVD_TLS_CLIENT_CA`) as every other Phase 8 feature.
+      **Demo materials**: `scripts/generate_demo_certs.sh` (openssl CLI,
+      not vendored code) generates a throwaway CA + domain cert + gateway
+      client cert into `certs/` (gitignored — regenerate, don't commit
+      keys); `config/domain_body_mtls.yaml` + `config/gateway_mtls.yaml`
+      are the mTLS-enabled siblings of the existing plain-HTTP demo pair,
+      kept separate so the already-documented curl workflow above keeps
+      working unchanged.
+      **Tests**: `test_config_loader_server_tls_fields_parsed`,
+      `test_config_loader_server_tls_requires_cert_and_key`,
+      `test_config_loader_sovd_proxy_tls_block_parses_without_throwing` —
+      config-parsing only; the actual TLS handshake enforcement is OpenSSL's
+      own correctness, not this project's code, so it isn't re-tested inside
+      the unit suite (see the tests' own comment for why). 542 assertions
+      passing in `test_core` (up from 536).
+      **Verified live** against two real running servers with real
+      openssl-generated certs: gateway → mTLS domain proxy returns typed
+      data (`{"id":"battery_voltage","value":13.0,"unit":"V"}`); direct
+      HTTPS to the domain with the correct client cert succeeds identically;
+      direct HTTPS with **no** client cert gets a TLS-level connection
+      failure (`Broken pipe`, curl exit 55, `http_code=000` — the
+      handshake itself is refused, not an HTTP-layer 4xx); direct HTTPS
+      with a **self-signed cert not signed by the demo CA** also gets
+      `http_code=000` — confirming the CA-chain check is real, not a
+      no-op. The pre-existing plain-HTTP two-tier demo
+      (`config/domain_body.yaml` + `config/gateway.yaml`) was re-verified
+      unchanged after the `main.cpp` restructure.
 - [x] **OAuth2 / token auth at the external boundary — DONE, 2026-08-20,
       scoped narrower than the phrase suggests.** Not a full OAuth2
       authorization server (auth-code flow, client registration, refresh
@@ -1322,16 +1408,73 @@ else streamed).
       `read:data` token (minted via `sovd_mint_token`) it succeeds — all
       four cases, plus both `oauth2_denied` events landing in the server's
       event stream with correlation ids, confirmed against the real binary.
-- [ ] **SecurityAccess (`0x27`) wiring — needs BOTH halves, see D2.** The
-      mechanism is already built and tested in isolation in Phase 2
-      (`uds_services` requestSeed/sendKey, plus the clearly-labelled
-      `derive_key_DEMO_ONLY_NOT_SECURE` stand-in). It is unwired because
-      there was nothing to gate on. Wiring it means:
-      - adding a catalog field (`requires_security_level`, parallel to the
-        existing `requires_session`) = what the ECU demands, **and**
-      - an OAuth2 scope check = whether this client may request that level.
-      One without the other is incomplete. Real key derivation stays
-      OEM-proprietary; the stand-in must remain visibly labelled.
+- [x] **SecurityAccess (`0x27`) wiring — DONE, 2026-08-20, both D2 halves.**
+      - **ECU-demand half**: `catalog::DataItem::requires_security_level`
+        (`std::optional<int>`, parallel to `requires_session`; no width
+        field, same documented enum-DID limit `encode()`/B1 already has).
+        `UdsDoipContext::ensure_security_for_did()` (`uds_doip_adapter.cpp`)
+        checks it and calls `SessionManager::ensure_security_level()`,
+        which performs the real `0x27` requestSeed/sendKey exchange (via
+        `uds_services`' existing encode/decode + the clearly-labelled
+        `derive_key_DEMO_ONLY_NOT_SECURE` stand-in) and is called from
+        `uds_doip_write_data` right after session escalation — real ECUs
+        typically only accept SecurityAccess outside the default session,
+        so session-first ordering matches actual UDS stack behavior, not
+        just convenience. `revert_to_default()` and the session-manager's
+        own idle-timeout both clear the unlocked level along with the
+        session, matching that a real ECU ties SecurityAccess to the
+        session it was granted in.
+        **A real bug this caught**: the first pass of this wiring computed
+        `level + 1` before calling `encode_security_access_send_key`/
+        `decode_security_access_key_accepted` — both of which *already*
+        derive the sendKey sub-function (`level + 1`) internally (see
+        `test_uds_security_access_seed_key_roundtrip`, already passing
+        since Phase 2). That's a double-increment (level 1 → sub-function
+        3 instead of 2), caught by
+        `test_adapter_write_data_performs_security_access_when_catalog_
+        demands_it` actually failing against a `FakeEcu` that implements
+        the real protocol, not by inspection — fixed in
+        `session_manager.cpp` to pass the plain level through.
+      - **OAuth2-scope half**: `Router::has_oauth2_scope()` (re-verifies
+        the bearer token in place rather than threading claims down from
+        the pre-routing hook — HMAC verification is cheap, and this keeps
+        `handle_put_data`'s new dependency a single function call instead
+        of a request-scoped claims object plumbed through every handler
+        signature). `handle_put_data` calls it with a new
+        `execute:security_access` scope — deliberately a fourth scope
+        beyond the three named in Phase 1's client-config sketch, not
+        reused from `execute:routines`, because D2's whole point was that
+        *this* permission needs to be checked independently of "may write
+        at all." Checked only for items that actually carry
+        `requires_security_level`; every other write is unaffected (still
+        gated by `execute:routines` alone, as before this item existed).
+        `oauth2_secret_` empty (auth disabled entirely) makes this a
+        no-op — the adapter-side seed/key exchange with the real ECU is
+        still what actually gates the write in that case, matching every
+        other Phase 8 feature's "unset means no check" shape. Denials emit
+        a `security_access_scope_denied` event (entity, id, correlation_id).
+      **Tests**: `test_session_manager_ensure_security_level_seed_key_
+      exchange`, `test_session_manager_ensure_security_level_wrong_key_
+      fails`, `test_session_manager_revert_to_default_clears_security_
+      level` (197 assertions in `test_uds_doip`, up from 180) —
+      `test_adapter_write_data_performs_security_access_when_catalog_
+      demands_it` and `test_adapter_write_data_fails_when_security_access_
+      rejected` exercise the full adapter-level wire path against a real
+      `FakeDoipServer`, using the actual derived key bytes (seed `{0x12,
+      0x34}`, level 1 → key `{0xB6, 0x90}`), not a stubbed exchange.
+      `test_http_security_access_scope_gates_write_beyond_execute_
+      routines` (`test_core`) proves an `execute:routines`-only token gets
+      `403` on a `requires_security_level` item while an
+      `execute:routines` + `execute:security_access` token succeeds, and
+      that a plain write with no security requirement is unaffected — 542
+      assertions in `test_core` (up from 531, some from the mTLS config
+      tests above).
+      Real key derivation stays OEM-proprietary; the stand-in remains
+      visibly labelled and this project's own read/write demo entities
+      (`catalogs/bcm.yaml`) don't use `requires_security_level` — it's
+      exercised by test fixtures only, matching that no live DoIP target
+      ships with this project to demonstrate it against for real (same
+      call Phase 2 already made about `catalogs/bcm.yaml` itself).
 - [x] **Default-deny path/method whitelist at the gateway tier — DONE,
       2026-08-20.** `routes.cpp`'s existing pre-routing hook (already home to
       CORS and per-request timing) gained one more check: when `role_ ==
@@ -1539,18 +1682,23 @@ else streamed).
 
 Phases 1 → 2 → 3 were the credible, finishable core — **done**.
 Phases 4 → 6 made it architecturally serious — **done**.
-Phase 7 is built; Phase 8 is polish and production posture — **remaining**.
+Phase 7 and Phase 8 (polish and production posture) are both **done**.
 
 **Immediate sequence from here:**
 1. ~~Settle **D1**, **D2**, **D3**~~ — **done**, see OPEN DECISIONS above
 2. ~~**B1** catalog `encode()` + validation~~ — **done**
 3. ~~**B2** CORS, with SSE verified separately via `EventSource`~~ — **done**
 4. ~~**B3** restricted-build fix~~ — **done**
-5. ~~Phase 7 screens 1 → 2 → 3 → 4~~ — **built, 2026-08-20**; give it a real
-   browser pass (visual/click-through) before treating it as fully verified,
-   not just built — no browser automation was available in the session that
-   wrote it
-6. Phase 8, restricted build first
+5. ~~Phase 7 screens 1 → 2 → 3 → 4~~ — **built 2026-08-20, browser-verified
+   2026-08-20** (Playwright MCP + Chromium, all four screens click-through
+   tested against a live server, zero console errors)
+6. ~~Phase 8~~ — **done, 2026-08-20**: restricted build, gateway whitelist,
+   resource limits, connection pooling, audit log, OAuth2, mTLS,
+   SecurityAccess (D2) all landed and live-verified
+
+**What's left, project-wide**: nothing — every phase (0–8) is built, tested,
+and live-verified, including the Phase 7 UI's actual rendered output in a
+real browser.
 
 For interviews, Phases 1, 3, and 6 show understanding of *why* SOVD exists
 rather than just an ability to serve JSON over HTTP. Self-description and

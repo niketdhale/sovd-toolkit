@@ -104,11 +104,17 @@ bool SessionManager::ensure_security_level(uint8_t level) {
     if (!uds::decode_security_access_seed(seed_resp, level, seed)) return false;
 
     auto key = uds::derive_key_DEMO_ONLY_NOT_SECURE(seed, level);
-    auto send_key_level = static_cast<uint8_t>(level + 1);
-    auto key_req = uds::encode_security_access_send_key(send_key_level, key);
+    // encode_security_access_send_key/decode_security_access_key_accepted
+    // both derive the sendKey sub-function (level + 1) internally -- they
+    // take the plain requestSeed level, not a pre-incremented one. Passing
+    // level + 1 here would double-increment (e.g. level 1 -> sub-function 3
+    // instead of 2), a real bug caught by
+    // test_adapter_write_data_performs_security_access_when_catalog_demands_it
+    // actually failing, not by inspection.
+    auto key_req = uds::encode_security_access_send_key(level, key);
     std::vector<uint8_t> key_resp;
     if (!send_(key_req, key_resp)) return false;
-    if (!uds::decode_security_access_key_accepted(key_resp, send_key_level)) return false;
+    if (!uds::decode_security_access_key_accepted(key_resp, level)) return false;
 
     lk.lock();
     current_security_level_ = level;

@@ -1,0 +1,28 @@
+# Phase 8 (mTLS) variant of config/domain_body.yaml: same topology, but
+# this domain server requires and verifies a client certificate on every
+# connection (server.tls.client_ca set) -- CLAUDE.md: "internal hop must
+# verify the gateway's certificate, not trust a forwarded external bearer
+# token". Run `scripts/generate_demo_certs.sh` first to produce certs/.
+server:
+  id: sovd-body-domain-mtls
+  port: 20013
+  role: domain
+  tls:
+    cert: certs/domain.crt
+    key: certs/domain.key
+    client_ca: certs/ca.crt
+
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/body
+    type: area
+  - path: vehicle/body/bcm
+    type: component
+    adapter:
+      kind: mock
+      did_catalog: catalogs/bcm.yaml
+  - path: vehicle/body/door_ctrl
+    type: component
+    adapter:
+      kind: mock

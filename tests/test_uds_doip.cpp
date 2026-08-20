@@ -47,6 +47,14 @@ struct FakeEcu {
     std::atomic<int> heartbeat_calls{0};
     std::atomic<bool> fail_next_session_control{false};
 
+    // Phase 8 (D2): 0x27 SecurityAccess -- a real requestSeed/sendKey
+    // exchange using this project's own derive_key_DEMO_ONLY_NOT_SECURE, so
+    // this fixture exercises the actual wire encode/decode SessionManager
+    // uses, not a stand-in for it.
+    std::atomic<int> security_access_calls{0};
+    std::atomic<bool> reject_security_key{false};
+    std::vector<uint8_t> last_seed;
+
     bool send(const std::vector<uint8_t> &req, std::vector<uint8_t> &resp) {
         if (req.empty()) return false;
         if (req[0] == 0x10) { // DiagnosticSessionControl
@@ -59,6 +67,24 @@ struct FakeEcu {
         if (req[0] == 0x3E) { // TesterPresent
             heartbeat_calls++;
             resp = {0x7E, 0x00};
+            return true;
+        }
+        if (req[0] == 0x27) { // SecurityAccess
+            security_access_calls++;
+            if (req.size() < 2) return false;
+            uint8_t sub = req[1];
+            if (sub % 2 == 1) { // odd sub-function = requestSeed
+                last_seed = {0x12, 0x34};
+                resp = {0x67, sub};
+                resp.insert(resp.end(), last_seed.begin(), last_seed.end());
+                return true;
+            }
+            // even sub-function = sendKey, level is sub - 1
+            uint8_t level = static_cast<uint8_t>(sub - 1);
+            auto expected_key = derive_key_DEMO_ONLY_NOT_SECURE(last_seed, level);
+            std::vector<uint8_t> got_key(req.begin() + 2, req.end());
+            if (reject_security_key.load() || got_key != expected_key) return false;
+            resp = {0x67, sub};
             return true;
         }
         return false;
@@ -152,6 +178,53 @@ void test_session_manager_escalate_across_non_default_sessions_no_deadlock() {
     ASSERT_TRUE(sm.ensure_session(0x03)); // extended
     ASSERT_TRUE(sm.ensure_session(0x02)); // programming, straight from extended
     ASSERT_EQ(sm.current_session_type(), static_cast<uint8_t>(0x02));
+}
+
+// Phase 8 (D2): SessionManager::ensure_security_level -- the ECU-demand
+// half of SecurityAccess gating. requestSeed/sendKey via FakeEcu's real
+// encode/decode + derive_key_DEMO_ONLY_NOT_SECURE, not a stubbed-out true.
+void test_session_manager_ensure_security_level_seed_key_exchange() {
+    FakeEcu ecu;
+    SessionManagerConfig cfg;
+    cfg.heartbeat_interval_ms = 200;
+    cfg.idle_timeout_ms = 5000;
+    SessionManager sm([&](const auto &req, auto &resp) { return ecu.send(req, resp); }, cfg);
+
+    ASSERT_EQ(sm.current_security_level(), static_cast<uint8_t>(0));
+    ASSERT_TRUE(sm.ensure_security_level(1));
+    ASSERT_EQ(sm.current_security_level(), static_cast<uint8_t>(1));
+    ASSERT_EQ(ecu.security_access_calls.load(), 2); // requestSeed + sendKey
+
+    ASSERT_TRUE(sm.ensure_security_level(1)); // already unlocked -> no redundant exchange
+    ASSERT_EQ(ecu.security_access_calls.load(), 2);
+}
+
+void test_session_manager_ensure_security_level_wrong_key_fails() {
+    FakeEcu ecu;
+    ecu.reject_security_key = true;
+    SessionManagerConfig cfg;
+    cfg.heartbeat_interval_ms = 200;
+    cfg.idle_timeout_ms = 5000;
+    SessionManager sm([&](const auto &req, auto &resp) { return ecu.send(req, resp); }, cfg);
+
+    ASSERT_FALSE(sm.ensure_security_level(1));
+    ASSERT_EQ(sm.current_security_level(), static_cast<uint8_t>(0));
+}
+
+// A real ECU ties SecurityAccess to the session it was unlocked in --
+// reverting the session must drop the unlocked level too, not leave stale
+// bookkeeping that claims a level is still unlocked.
+void test_session_manager_revert_to_default_clears_security_level() {
+    FakeEcu ecu;
+    SessionManagerConfig cfg;
+    cfg.heartbeat_interval_ms = 200;
+    cfg.idle_timeout_ms = 5000;
+    SessionManager sm([&](const auto &req, auto &resp) { return ecu.send(req, resp); }, cfg);
+
+    ASSERT_TRUE(sm.ensure_session(0x03));
+    ASSERT_TRUE(sm.ensure_security_level(1));
+    ASSERT_TRUE(sm.revert_to_default());
+    ASSERT_EQ(sm.current_security_level(), static_cast<uint8_t>(0));
 }
 
 // ---------------------------------------------------------------------
@@ -463,6 +536,11 @@ data:
     type: raw
     access: read_write
     io_control: true
+  - id: secure_actuator
+    did: 0x0500
+    type: raw
+    access: read_write
+    requires_security_level: 1
 operations:
   - id: self_test
     routine_id: 0x0203
@@ -618,6 +696,42 @@ void test_adapter_write_data_uses_io_control_per_catalog() {
     std::remove(catalog_path.c_str());
 }
 
+// Phase 8 (D2): UdsDoipContext::ensure_security_for_did -- the adapter-level
+// wiring between the catalog's requires_security_level field and
+// SessionManager::ensure_security_level. Uses the real derived key (seed
+// {0x12, 0x34}, level 1 -> {0xB6, 0x90} via derive_key_DEMO_ONLY_NOT_SECURE)
+// so this proves the actual wire bytes, not just that some exchange happens.
+void test_adapter_write_data_performs_security_access_when_catalog_demands_it() {
+    std::string catalog_path = write_temp_catalog();
+    FakeDoipServer server;
+    server.set_response({0x27, 0x01}, {0x67, 0x01, 0x12, 0x34});             // requestSeed
+    server.set_response({0x27, 0x02, 0xB6, 0x90}, {0x67, 0x02});             // sendKey (correct derived key)
+    server.set_response({0x2E, 0x05, 0x00, 0x09}, {0x6E, 0x05, 0x00});       // write secure_actuator = 0x09
+
+    const sovd_vtable_t *v = sovd_uds_doip_adapter_vtable();
+    auto *ctx = v->create(adapter_config_json(server.port(), catalog_path).c_str());
+    ASSERT_TRUE(ctx != nullptr);
+
+    uint8_t value = 0x09;
+    ASSERT_TRUE(v->write_data(ctx, "vehicle/body/bcm", "0500", &value, 1) == SOVD_OK);
+
+    v->destroy(ctx);
+    std::remove(catalog_path.c_str());
+}
+
+void test_adapter_write_data_fails_when_security_access_rejected() {
+    std::string catalog_path = write_temp_catalog();
+    FakeDoipServer server; // no 0x27 response configured -> default negative fallback
+    const sovd_vtable_t *v = sovd_uds_doip_adapter_vtable();
+    auto *ctx = v->create(adapter_config_json(server.port(), catalog_path).c_str());
+
+    uint8_t value = 0x09;
+    ASSERT_TRUE(v->write_data(ctx, "vehicle/body/bcm", "0500", &value, 1) == SOVD_FORBIDDEN);
+
+    v->destroy(ctx);
+    std::remove(catalog_path.c_str());
+}
+
 void test_adapter_set_mode_extended_then_default() {
     FakeDoipServer server;
     server.set_response({0x10, 0x03}, {0x50, 0x03, 0x00, 0x32, 0x01, 0xF4});
@@ -748,6 +862,8 @@ int main() {
     RUN_TEST(test_adapter_write_data_escalates_session_from_catalog);
     RUN_TEST(test_adapter_write_data_fails_when_escalation_rejected);
     RUN_TEST(test_adapter_write_data_uses_io_control_per_catalog);
+    RUN_TEST(test_adapter_write_data_performs_security_access_when_catalog_demands_it);
+    RUN_TEST(test_adapter_write_data_fails_when_security_access_rejected);
     RUN_TEST(test_adapter_set_mode_extended_then_default);
     RUN_TEST(test_adapter_execute_operation_roundtrip);
 
@@ -757,6 +873,9 @@ int main() {
     RUN_TEST(test_session_manager_heartbeat_fires_while_escalated);
     RUN_TEST(test_session_manager_idle_timeout_reverts_on_its_own);
     RUN_TEST(test_session_manager_escalate_across_non_default_sessions_no_deadlock);
+    RUN_TEST(test_session_manager_ensure_security_level_seed_key_exchange);
+    RUN_TEST(test_session_manager_ensure_security_level_wrong_key_fails);
+    RUN_TEST(test_session_manager_revert_to_default_clears_security_level);
 
     RUN_TEST(test_nrc_map_matches_claude_md_table);
     RUN_TEST(test_nrc_map_exhaustive);

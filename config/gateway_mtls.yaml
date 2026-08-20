@@ -1,0 +1,39 @@
+# Phase 8 (mTLS) variant of config/gateway.yaml: proxies to
+# domain_body_mtls.yaml's server over https://, presenting the gateway's
+# own client cert and verifying the domain's server cert against the demo
+# CA (both directions of mutual TLS) instead of a plain HTTP forward. Run:
+#   scripts/generate_demo_certs.sh
+#   ./build/sovd_server config/domain_body_mtls.yaml   (port 20013)
+#   ./build/sovd_server config/gateway_mtls.yaml        (port 20012)
+server:
+  id: sovd-gateway-mtls
+  port: 20012
+  role: gateway
+
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/body
+    type: area
+  - path: vehicle/body/bcm
+    type: component
+    adapter:
+      kind: sovd_proxy
+      base_url: https://127.0.0.1:20013
+      remote_path: vehicle/body/bcm
+      forward_locks: true
+      tls:
+        client_cert: certs/gateway_client.crt
+        client_key: certs/gateway_client.key
+        ca_cert: certs/ca.crt
+  - path: vehicle/body/door_ctrl
+    type: component
+    adapter:
+      kind: sovd_proxy
+      base_url: https://127.0.0.1:20013
+      remote_path: vehicle/body/door_ctrl
+      forward_locks: true
+      tls:
+        client_cert: certs/gateway_client.crt
+        client_key: certs/gateway_client.key
+        ca_cert: certs/ca.crt

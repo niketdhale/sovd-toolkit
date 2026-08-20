@@ -24,6 +24,17 @@ struct ServerConfig {
     std::string id;
     int port = 20002;
     std::string role = "domain";
+
+    // Phase 8 (mTLS): tls_cert/tls_key present => main.cpp binds an
+    // httplib::SSLServer instead of a plain Server. tls_client_ca present
+    // on top of that => the server requires and verifies a client
+    // certificate on every connection (mutual TLS) -- the gateway<->domain
+    // hop CLAUDE.md's mTLS item is about, not the external tester-facing
+    // boundary (that's OAuth2's job). All empty (the default) means plain
+    // HTTP, unchanged from every config that predates this.
+    std::string tls_cert;
+    std::string tls_key;
+    std::string tls_client_ca;
 };
 
 // Populates registry (entities + adapters) and router (catalogs + proxy

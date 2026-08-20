@@ -35,8 +35,20 @@ namespace sovd::server {
 // Locks are always forwarded too (never a toggle) — CLAUDE.md: "forward
 // must NEVER cache lock state locally."
 struct ProxyTarget {
-    std::string base_url;   // e.g. "http://127.0.0.1:20003"
+    std::string base_url;   // e.g. "http://127.0.0.1:20003" or "https://..."
     std::string remote_path; // full path on the remote server
+
+    // Phase 8 (mTLS): populated only for an https:// base_url that needs
+    // mutual TLS to a domain server requiring client certs -- "verify the
+    // gateway's certificate, not trust a forwarded external bearer token"
+    // (CLAUDE.md). tls_ca_cert verifies the *domain's* server certificate
+    // against this project's own demo CA (self-signed, not a public one),
+    // so the mutual auth runs both directions. All empty (the default) for
+    // a plain http:// target -- nothing new to configure for the existing
+    // demo.
+    std::string tls_client_cert;
+    std::string tls_client_key;
+    std::string tls_ca_cert;
 };
 
 // Phase 8: one persistent httplib::Client per proxied entity (created
@@ -134,6 +146,20 @@ private:
     bool check_lock_header(const httplib::Request &req, httplib::Response &res, const std::string &path);
     const catalog::Catalog *find_catalog(const std::string &entity_path) const;
     const ProxyTarget *find_proxy(const std::string &entity_path) const;
+
+    // Phase 8 (D2): the OAuth2-scope half of SecurityAccess gating -- the
+    // catalog-field half (DataItem::requires_security_level, "what the ECU
+    // demands") is checked adapter-side in uds_doip; this answers "may
+    // *this client* even ask for that". Re-verifies the bearer token
+    // in-place rather than threading claims down from the pre-routing hook
+    // -- HMAC verification is cheap and this keeps handle_put_data's only
+    // new dependency a single function call, not a request-scoped claims
+    // object plumbed through every handler signature. oauth2_secret_ empty
+    // (auth disabled entirely) makes this a no-op returning true, same
+    // "unset means no check" shape as every other Phase 8 opt-in -- the
+    // adapter-side seed/key exchange with the real ECU is still what
+    // actually gates the write in that case, not this.
+    bool has_oauth2_scope(const httplib::Request &req, const std::string &scope) const;
 
     // If entity_path is proxied, forwards the whole request (method, the
     // URL suffix past .../entities/{entity_path}, query params, body, the

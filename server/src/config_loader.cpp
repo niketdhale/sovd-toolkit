@@ -137,6 +137,18 @@ void attach_entity(const std::string &path, EntityType type, const YAML::Node &e
         if (target.base_url.empty()) {
             throw ConfigError("sovd_proxy adapter for " + path + " is missing required field: base_url");
         }
+        // Phase 8 (mTLS): optional -- only meaningful for an https://
+        // base_url. client_cert/client_key are what this gateway presents
+        // to prove its own identity to the domain server; ca_cert verifies
+        // the domain's server certificate against this project's own demo
+        // CA rather than the system trust store, since these are
+        // self-signed certs.
+        if (adapter["tls"]) {
+            YAML::Node tls = adapter["tls"];
+            if (tls["client_cert"]) target.tls_client_cert = tls["client_cert"].as<std::string>();
+            if (tls["client_key"]) target.tls_client_key = tls["client_key"].as<std::string>();
+            if (tls["ca_cert"]) target.tls_ca_cert = tls["ca_cert"].as<std::string>();
+        }
         // forward_locks is accepted (so the YAML matches CLAUDE.md's
         // documented schema) but not branched on: locks are always
         // forwarded for a proxied entity, never cached locally, per
@@ -179,6 +191,19 @@ ServerConfig load_topology_from_string(const std::string &yaml_text, EntityRegis
         std::vector<std::string> origins;
         for (const auto &o : server_node["cors_allowed_origins"]) origins.push_back(o.as<std::string>());
         router.set_cors_allowed_origins(std::move(origins));
+    }
+
+    // Phase 8 (mTLS): optional. client_ca alone (no cert/key) would leave
+    // the server with nothing to present, so it's a structural error, not
+    // a degrade-gracefully case like a single bad entity adapter.
+    if (server_node["tls"]) {
+        YAML::Node tls = server_node["tls"];
+        if (!tls["cert"] || !tls["key"]) {
+            throw ConfigError("server.tls requires both cert and key");
+        }
+        cfg.tls_cert = tls["cert"].as<std::string>();
+        cfg.tls_key = tls["key"].as<std::string>();
+        if (tls["client_ca"]) cfg.tls_client_ca = tls["client_ca"].as<std::string>();
     }
 
     if (!root["entities"] || !root["entities"].IsSequence()) {

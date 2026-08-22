@@ -107,6 +107,25 @@ bool verify_token(const std::string &token, const std::string &secret, TokenClai
         base64url_encode(reinterpret_cast<const unsigned char *>(expected_sig.data()), expected_sig.size());
     if (!constant_time_equal(sig_b64, expected_sig_b64)) return false;
 
+    // SOVD_REVIEW_FEEDBACK.md Task 6: not currently exploitable -- this
+    // verifier always recomputes HS256 unconditionally and never branches
+    // on the header, so alg:none / RS256-vs-HS256 confusion (both of which
+    // require the verifier to *switch* on alg) don't apply today. Checked
+    // anyway, after the signature (never before it -- see the ordering note
+    // above), as defense in depth: a future refactor that adds real
+    // algorithm selection can't silently reintroduce that bug class if this
+    // is already here.
+    std::string header_b64 = token.substr(0, first_dot);
+    std::string header_json;
+    if (!base64url_decode(header_b64, header_json)) return false;
+    json header;
+    try {
+        header = json::parse(header_json);
+    } catch (...) {
+        return false;
+    }
+    if (!header.contains("alg") || header["alg"] != "HS256") return false;
+
     std::string payload_b64 = token.substr(first_dot + 1, second_dot - first_dot - 1);
     std::string payload_json;
     if (!base64url_decode(payload_b64, payload_json)) return false;

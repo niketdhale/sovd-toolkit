@@ -70,6 +70,14 @@ std::string uds_doip_config_json(const YAML::Node &adapter) {
 // uds_doip's session-escalation/io_control decisions) -- CLAUDE.md: "not a
 // shared runtime instance". Any adapter kind that owns real diagnostic data
 // can have one; not just uds_doip.
+//
+// SOVD_REVIEW_FEEDBACK.md Task 5: this is only ever called from inside the
+// SOVD_HAVE_MOCK / SOVD_HAVE_UDS_DOIP blocks below, so with both adapters
+// compiled out (the proxy-only gateway build B3 exists to enable) it was an
+// orphaned definition -- -Wunused-function in exactly the restricted build
+// CLAUDE.md's "clean in every documented configuration" claim is supposed
+// to cover.
+#if defined(SOVD_HAVE_MOCK) || defined(SOVD_HAVE_UDS_DOIP)
 void attach_router_catalog_if_present(const std::string &path, const YAML::Node &adapter, Router &router) {
     if (!adapter["did_catalog"]) return;
     try {
@@ -78,6 +86,7 @@ void attach_router_catalog_if_present(const std::string &path, const YAML::Node 
         std::cerr << "warning: failed to load catalog for " << path << ": " << ex.what() << std::endl;
     }
 }
+#endif // defined(SOVD_HAVE_MOCK) || defined(SOVD_HAVE_UDS_DOIP)
 
 // Attaches whatever adapter kind the YAML names, or registers a plain
 // grouping node (no vtable) if the kind is unknown, not compiled into this

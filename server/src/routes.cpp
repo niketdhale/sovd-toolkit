@@ -129,7 +129,13 @@ const std::vector<ScopedRoute> &oauth2_scope_table() {
         {"GET", std::regex(R"(^/v1/entities/.+/faults$)"), "read:faults"},
         {"DELETE", std::regex(R"(^/v1/entities/.+/faults$)"), "execute:routines"},
         {"GET", std::regex(R"(^/v1/entities/.+/data$)"), "read:data"},
-        {"GET", std::regex(R"(^/v1/entities/.+/data/.+/stream$)"), "read:data"},
+        // The SSE stream route is deliberately absent here -- EventSource
+        // can't set an Authorization header, so it can't be gated by this
+        // table at all. check_oauth2() bypasses it explicitly; it does its
+        // own bearer-or-ticket check inside handle_stream_data instead. The
+        // ticket-minting POST *is* a normal bearer route, scoped the same
+        // as everything else that reads data.
+        {"POST", std::regex(R"(^/v1/entities/.+/data/.+/stream-ticket$)"), "read:data"},
         {"GET", std::regex(R"(^/v1/entities/.+/data/.+$)"), "read:data"},
         {"PUT", std::regex(R"(^/v1/entities/.+/data/.+$)"), "execute:routines"},
         {"POST", std::regex(R"(^/v1/entities/.+/modes$)"), "execute:routines"},
@@ -143,25 +149,40 @@ const std::vector<ScopedRoute> &oauth2_scope_table() {
 
 enum class OAuth2Result { Ok, Unauthorized, Forbidden };
 
-// "/" (version discovery) and any unmatched route are deliberately outside
-// this table -- "/" so a client can always learn api_versions before it has
-// a token to use, and an unmatched route so a bad path 404s from normal
-// routing instead of leaking "route exists but you're unauthorized" through
-// this layer.
+// "/" (version discovery) is the one route deliberately outside this table
+// entirely -- a client must be able to learn api_versions before it has a
+// token to use. The SSE stream GET is also bypassed here (see the comment
+// on its stream-ticket table entry above): it does its own bearer-or-ticket
+// check inside handle_stream_data, where the entity path/id are already
+// parsed out of the URL.
+//
+// SOVD_REVIEW_FEEDBACK.md Task 2: everything else is default-DENY, not
+// default-allow. Originally an unmatched (method, path) returned Ok --
+// meaning a route added to register_routes() later without a matching
+// entry here was silently reachable with no token at all, the opposite
+// posture from the gateway whitelist's fail-closed default a few lines up.
+// Now an unmatched route just falls through to "must present *a* valid
+// token, no specific scope" (required_scope stays nullptr) instead of
+// short-circuiting -- same treatment `/v1/entities` and `.../docs` already
+// get deliberately. This can only make more routes require a token than
+// before, never fewer, so it's safe against every route this project has
+// today; test_http_oauth2_every_real_route_requires_auth_when_enabled
+// (test_core.cpp) is the drift guard -- it walks every route
+// register_routes() actually registers and asserts none of them are
+// reachable with zero credentials while OAuth2 is on.
 OAuth2Result check_oauth2(const std::string &secret, const std::string &method, const std::string &path,
                            const std::string &auth_header) {
     if (path == "/") return OAuth2Result::Ok;
+    static const std::regex stream_pattern(R"(^/v1/entities/.+/data/.+/stream$)");
+    if (method == "GET" && std::regex_match(path, stream_pattern)) return OAuth2Result::Ok;
 
     const char *required_scope = nullptr;
-    bool matched = false;
     for (auto &route : oauth2_scope_table()) {
         if (route.method == method && std::regex_match(path, route.pattern)) {
             required_scope = route.required_scope;
-            matched = true;
             break;
         }
     }
-    if (!matched) return OAuth2Result::Ok;
 
     static const std::string prefix = "Bearer ";
     if (auth_header.size() <= prefix.size() || auth_header.compare(0, prefix.size(), prefix) != 0) {
@@ -383,8 +404,15 @@ void Router::register_routes(httplib::Server &svr) {
                 // preflight that only allows Content-Type silently breaks
                 // every lock-gated write and every correlated request from
                 // the browser, since those headers wouldn't pass preflight.
+                // Authorization added by SOVD_REVIEW_FEEDBACK.md Task 1a --
+                // this list predates Phase 8's OAuth2 (B2 was Phase 7, mid-
+                // 2026-08-20; OAuth2 landed the same day, after). Without it
+                // a preflight carrying `Authorization: Bearer ...` never
+                // lists the header back, so the browser blocks the real
+                // request before it's even sent -- the whole web UI 401s
+                // the instant SOVD_OAUTH2_SECRET is set.
                 res.set_header("Access-Control-Allow-Headers",
-                                "Content-Type, X-SOVD-Lock-Id, X-SOVD-Correlation-Id");
+                                "Content-Type, Authorization, X-SOVD-Lock-Id, X-SOVD-Correlation-Id");
                 res.set_header("Access-Control-Max-Age", "600");
             }
             res.status = 204;
@@ -467,6 +495,14 @@ void Router::register_routes(httplib::Server &svr) {
     svr.Get(R"(/v1/entities/(.+)/data/(.+)/stream)", [this](const httplib::Request &req, httplib::Response &res) {
         handle_stream_data(req, res, req.matches[1], req.matches[2]);
     });
+    // Task 1c: mints the ticket a browser EventSource passes to the GET
+    // .../stream route above in lieu of an Authorization header. A distinct
+    // POST method, so no ambiguity with the GET .../stream pattern despite
+    // the shared prefix.
+    svr.Post(R"(/v1/entities/(.+)/data/(.+)/stream-ticket)",
+             [this](const httplib::Request &req, httplib::Response &res) {
+                 handle_post_stream_ticket(req, res, req.matches[1], req.matches[2]);
+             });
     svr.Get(R"(/v1/entities/(.+)/data/(.+))", [this](const httplib::Request &req, httplib::Response &res) {
         handle_get_data(req, res, req.matches[1], req.matches[2]);
     });
@@ -600,11 +636,24 @@ bool Router::check_lock_header(const httplib::Request &req, httplib::Response &r
 
 void Router::handle_root(const httplib::Request &req, httplib::Response &res) {
     correlation_id_for(req, res);
+    // Phase 8 follow-up (SOVD_REVIEW_FEEDBACK.md Task 8, settled as D4 in
+    // CLAUDE.md): a POST/PUT .../locks response already echoes the actual
+    // *granted* TTL when a request exceeds kMaxLockTtlSeconds, but a caller
+    // that never reads the response body has no way to know 3600 was ever a
+    // ceiling rather than "whatever I asked for was honored". Advertising it
+    // here -- self-description, discovered once, same spot api_versions
+    // already lives -- lets a well-behaved client clamp its own request
+    // instead of finding out after the fact. Chosen over rejecting an
+    // over-ceiling request with 400: clamping-and-telling-the-truth was
+    // already the settled design (CLAUDE.md's original resource-limits
+    // writeup), this only fixes the "telling" part for a client that isn't
+    // reading response bodies.
     json body = {
         {"server_id", server_id_},
         {"role", role_},
         {"sovd_version", "phase0-demo"},
         {"api_versions", json::array({"v1"})},
+        {"limits", {{"lock_ttl_ceiling_seconds", kMaxLockTtlSeconds}}},
     };
     res.set_content(body.dump(), "application/json");
 }
@@ -700,6 +749,30 @@ void Router::handle_get_data(const httplib::Request &req, httplib::Response &res
 void Router::handle_stream_data(const httplib::Request &req, httplib::Response &res, const std::string &path,
                                  const std::string &id_or_did) {
     correlation_id_for(req, res);
+
+    // Task 1c: this route is exempted from the generic pre-routing oauth2
+    // check (see check_oauth2()'s comment on stream_pattern) because a
+    // browser EventSource can't set an Authorization header. Accept either
+    // a normal bearer token (curl, the CLI, any non-browser client) or a
+    // single-use ticket minted by POST .../stream-ticket -- what the web
+    // UI's EventSource actually opens the connection with. has_oauth2_scope
+    // already no-ops to true when OAuth2 is disabled, so this whole check
+    // collapses to "always authorized" in that case, same as every other
+    // route.
+    bool authorized = has_oauth2_scope(req, "read:data");
+    if (!authorized) {
+        std::string ticket = req.get_param_value("ticket");
+        authorized = !ticket.empty() && stream_tickets_.redeem(ticket, path, id_or_did);
+    }
+    if (!authorized) {
+        std::string corr = correlation_id_for(req, res);
+        emit_event(event_sink_, "oauth2_denied",
+                   {{"method", "GET"}, {"path", req.path}, {"status", 401}, {"correlation_id", corr}});
+        res.set_header("WWW-Authenticate", "Bearer");
+        write_error(res, 401, "UNAUTHORIZED", "missing or invalid bearer token or stream ticket");
+        return;
+    }
+
     const Entity *e = require_entity(res, path);
     if (!e) return;
     if (find_proxy(path)) {
@@ -749,6 +822,25 @@ void Router::handle_stream_data(const httplib::Request &req, httplib::Response &
         }
         return sink.is_writable();
     });
+}
+
+// Task 1c: mints a StreamTicketStore ticket for (path, id_or_did). A normal
+// bearer-authenticated route (see its oauth2_scope_table() entry, read:data)
+// -- the whole reason it exists is that the *stream itself* can't be gated
+// the same way. Doesn't validate that id_or_did actually resolves against
+// the catalog/adapter; the stream handler still does that real work, this
+// just proves "an authorized caller asked for this (path, id) recently".
+void Router::handle_post_stream_ticket(const httplib::Request &req, httplib::Response &res, const std::string &path,
+                                        const std::string &id_or_did) {
+    correlation_id_for(req, res);
+    const Entity *e = require_entity(res, path);
+    if (!e) return;
+    std::string ticket = stream_tickets_.issue(path, id_or_did);
+    json body;
+    body["ticket"] = ticket;
+    body["ttl_seconds"] = kStreamTicketTtlSeconds;
+    res.status = 201;
+    res.set_content(body.dump(), "application/json");
 }
 
 void Router::handle_get_data_batch(const httplib::Request &req, httplib::Response &res, const std::string &path) {

@@ -1,0 +1,42 @@
+# Domain-tier server, identical topology to config/domain_body.yaml, kept as
+# a separate file to make one thing obvious by its existence: OAuth2 has no
+# YAML keys at all (SOVD_REVIEW_FEEDBACK.md Task 3). Unlike CORS
+# (cors_allowed_origins below) or TLS (server.tls: -- see
+# config/domain_body_mtls.yaml), there is no `oauth2:` block this file could
+# have. Auth is turned on entirely by the SOVD_OAUTH2_SECRET env var at
+# process start -- a secret has no business living in a config file that
+# might get committed, logged, or handed to someone debugging a topology
+# issue who has no need to see it. See CLAUDE.md's Phase 8 section for the
+# full list of env-var-only settings.
+#
+# Run it:
+#   SOVD_OAUTH2_SECRET=demo-secret ./build/sovd_server config/domain_body_auth.yaml
+#   TOKEN=$(./build/sovd_mint_token demo-secret read:data,execute:routines 3600)
+#   curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:20003/v1/entities/vehicle/body/bcm/data
+#
+# Combine with the web UI (README.md's usage example 6): paste $TOKEN into
+# the Connect bar's token field. Screens 1-3 use it directly as a bearer
+# header; screen 4's live chart mints its own short-lived stream ticket
+# through that same token instead (Task 1c -- EventSource can't set
+# Authorization), so the field is the only thing you need to fill in.
+server:
+  id: sovd-body-domain-auth
+  port: 20003
+  role: domain
+  cors_allowed_origins:
+    - http://localhost:5173
+
+entities:
+  - path: vehicle
+    type: vehicle
+  - path: vehicle/body
+    type: area
+  - path: vehicle/body/bcm
+    type: component
+    adapter:
+      kind: mock
+      did_catalog: catalogs/bcm.yaml
+  - path: vehicle/body/door_ctrl
+    type: component
+    adapter:
+      kind: mock

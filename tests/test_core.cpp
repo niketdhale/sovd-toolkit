@@ -8,6 +8,9 @@
 #include <thread>
 #include <vector>
 
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+
 #include "httplib.h"
 #include "json.hpp"
 #include "mock_adapter.h"
@@ -623,8 +626,10 @@ void test_catalog_empty_document_is_valid_empty_catalog() {
 void test_catalog_load_from_file() {
     std::string path = std::string(SOVD_SOURCE_DIR) + "/catalogs/bcm.yaml";
     Catalog cat = Catalog::load_from_file(path);
-    ASSERT_EQ(cat.data().size(), static_cast<size_t>(3));
+    // vin, battery_voltage, door_lock_state, courtesy_light_delay (Task 7).
+    ASSERT_EQ(cat.data().size(), static_cast<size_t>(4));
     ASSERT_TRUE(cat.find_by_id("vin") != nullptr);
+    ASSERT_TRUE(cat.find_by_id("courtesy_light_delay") != nullptr);
 }
 
 void test_catalog_access_and_type_to_string() {
@@ -708,6 +713,11 @@ void test_http_root_and_entities() {
     ASSERT_EQ(root_body["role"].get<std::string>(), "domain");
     ASSERT_EQ(root_body["api_versions"].size(), static_cast<size_t>(1));
     ASSERT_EQ(root_body["api_versions"][0].get<std::string>(), "v1");
+    // SOVD_REVIEW_FEEDBACK.md Task 8 / CLAUDE.md's settled D4: a caller that
+    // never reads the lock-acquire response body has no way to learn 3600 is
+    // a ceiling rather than whatever it asked for -- advertised here so a
+    // well-behaved client can clamp its own request first.
+    ASSERT_EQ(root_body["limits"]["lock_ttl_ceiling_seconds"].get<int>(), sovd::kMaxLockTtlSeconds);
 
     auto ents = cli.Get("/v1/entities");
     ASSERT_TRUE(ents != nullptr);
@@ -1206,6 +1216,11 @@ void test_http_cors_preflight_options() {
     std::string allow_headers = preflight->get_header_value("Access-Control-Allow-Headers");
     ASSERT_TRUE(allow_headers.find("X-SOVD-Lock-Id") != std::string::npos);
     ASSERT_TRUE(allow_headers.find("X-SOVD-Correlation-Id") != std::string::npos);
+    // SOVD_REVIEW_FEEDBACK.md Task 1a: without Authorization here, a
+    // preflight carrying `Authorization: Bearer ...` never lists it back,
+    // so the browser blocks the real request before it's sent -- the whole
+    // web UI 401s the instant OAuth2 is enabled.
+    ASSERT_TRUE(allow_headers.find("Authorization") != std::string::npos);
 
     // A preflight from a non-allow-listed origin still gets a response (not
     // a 404/500), just without the header that would let the browser
@@ -1429,6 +1444,169 @@ void test_http_security_access_scope_gates_write_beyond_execute_routines() {
                                R"({"value":"locked"})", "application/json");
     ASSERT_TRUE(unaffected != nullptr);
     ASSERT_EQ(unaffected->status, 204);
+}
+
+// SOVD_REVIEW_FEEDBACK.md Task 2: default-DENY, not default-allow. Walks
+// every route register_routes() actually registers (same hardcoded list
+// test_http_gateway_whitelist_allows_every_real_route uses, for the same
+// reason -- httplib exposes no route-introspection API) with OAuth2 enabled
+// and zero credentials, asserting every one of them is 401 except "/". This
+// is the drift guard: it fails the moment a future route is reachable with
+// no token at all, which is exactly the bug this task fixed (an unmatched
+// route used to return OAuth2Result::Ok).
+void test_http_oauth2_every_real_route_requires_auth_when_enabled() {
+    TestServer ts;
+    ts.router.set_oauth2_secret("test-secret");
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    auto assert_401_no_creds = [](const httplib::Result &res, const std::string &label) {
+        ASSERT_TRUE(res != nullptr);
+        ASSERT_EQ(res->status, 401);
+        (void)label;
+    };
+
+    auto root = cli.Get("/");
+    ASSERT_TRUE(root != nullptr);
+    ASSERT_EQ(root->status, 200); // the one deliberate exemption
+
+    assert_401_no_creds(cli.Get("/v1/entities"), "entities");
+    assert_401_no_creds(cli.Get("/v1/entities/vehicle/body/bcm/faults"), "faults get");
+    assert_401_no_creds(cli.Delete("/v1/entities/vehicle/body/bcm/faults"), "faults delete");
+    assert_401_no_creds(cli.Get("/v1/entities/vehicle/body/bcm/data?ids=vin"), "data batch");
+    assert_401_no_creds(cli.Get("/v1/entities/vehicle/body/bcm/data/vin"), "data item");
+    assert_401_no_creds(
+        cli.Put("/v1/entities/vehicle/body/bcm/data/vin", R"({"value":"12345678901234567"})", "application/json"),
+        "data put");
+    assert_401_no_creds(cli.Post("/v1/entities/vehicle/body/bcm/modes", R"({"mode":"default"})", "application/json"),
+                         "modes");
+    assert_401_no_creds(cli.Post("/v1/entities/vehicle/body/bcm/operations/self_test", "{}", "application/json"),
+                         "operations");
+    assert_401_no_creds(cli.Post("/v1/entities/vehicle/body/bcm/locks", R"({"ttl_seconds":10})", "application/json"),
+                         "locks post");
+    assert_401_no_creds(cli.Put("/v1/entities/vehicle/body/bcm/locks/lock-1", "{}", "application/json"),
+                         "locks put");
+    assert_401_no_creds(cli.Delete("/v1/entities/vehicle/body/bcm/locks/lock-1"), "locks delete");
+    assert_401_no_creds(cli.Get("/v1/entities/vehicle/body/bcm/docs"), "docs");
+    assert_401_no_creds(cli.Post("/v1/entities/vehicle/body/bcm/data/vin/stream-ticket", "{}", "application/json"),
+                         "stream-ticket");
+
+    // The SSE stream GET does its own bearer-or-ticket check inside the
+    // handler (Task 1c), not the pre-routing table -- still 401 with zero
+    // credentials, just via a different code path, so it belongs in this
+    // coverage sweep too.
+    cli.set_read_timeout(2, 0);
+    bool stream_401 = false;
+    cli.Get(
+        "/v1/entities/vehicle/body/bcm/data/vin/stream?interval_ms=100", httplib::Headers{},
+        [&](const httplib::Response &res) {
+            stream_401 = res.status == 401;
+            return true;
+        },
+        [&](const char *, size_t) { return false; });
+    ASSERT_TRUE(stream_401);
+}
+
+// Task 1c: EventSource can't set an Authorization header, so the SSE stream
+// route accepts a short-lived single-use ticket (minted by a normal
+// bearer-gated POST) instead, carried in the query string.
+void test_http_oauth2_stream_ticket_flow() {
+    TestServer ts;
+    ts.router.set_oauth2_secret("test-secret");
+    httplib::Client cli("127.0.0.1", ts.port);
+    cli.set_read_timeout(2, 0);
+
+    auto stream_status = [&](const std::string &url) {
+        int status = -1;
+        cli.Get(
+            url, httplib::Headers{},
+            [&](const httplib::Response &res) {
+                status = res.status;
+                return true;
+            },
+            [&](const char *, size_t) { return false; });
+        return status;
+    };
+
+    // Zero credentials: 401, same as any other scoped route.
+    ASSERT_EQ(stream_status("/v1/entities/vehicle/body/bcm/data/battery_voltage/stream?interval_ms=100"), 401);
+
+    // A normal bearer token still works directly -- curl/CLI/any non-browser
+    // client is unaffected by the ticket mechanism.
+    std::string data_token = sovd::server::oauth2::mint_token("test-secret", {"read:data"}, 60);
+    int bearer_status = -1;
+    cli.Get(
+        "/v1/entities/vehicle/body/bcm/data/battery_voltage/stream?interval_ms=100",
+        httplib::Headers{{"Authorization", "Bearer " + data_token}},
+        [&](const httplib::Response &res) {
+            bearer_status = res.status;
+            return true;
+        },
+        [&](const char *, size_t) { return false; });
+    ASSERT_EQ(bearer_status, 200);
+
+    // The EventSource path: mint a ticket via the normal bearer-gated POST...
+    auto ticket_res = cli.Post("/v1/entities/vehicle/body/bcm/data/battery_voltage/stream-ticket",
+                                httplib::Headers{{"Authorization", "Bearer " + data_token}}, "{}", "application/json");
+    ASSERT_TRUE(ticket_res != nullptr);
+    ASSERT_EQ(ticket_res->status, 201);
+    json ticket_body = json::parse(ticket_res->body);
+    std::string ticket = ticket_body["ticket"].get<std::string>();
+    ASSERT_FALSE(ticket.empty());
+
+    // ...then open the stream with the ticket and no Authorization header at
+    // all -- exactly what a browser EventSource actually does.
+    ASSERT_EQ(stream_status("/v1/entities/vehicle/body/bcm/data/battery_voltage/stream?interval_ms=100&ticket=" +
+                             ticket),
+              200);
+
+    // Single-use: the same ticket doesn't work a second time.
+    ASSERT_EQ(stream_status("/v1/entities/vehicle/body/bcm/data/battery_voltage/stream?interval_ms=100&ticket=" +
+                             ticket),
+              401);
+
+    // A ticket minted for one data id doesn't redeem against another.
+    auto ticket_res2 = cli.Post("/v1/entities/vehicle/body/bcm/data/battery_voltage/stream-ticket",
+                                 httplib::Headers{{"Authorization", "Bearer " + data_token}}, "{}",
+                                 "application/json");
+    std::string ticket2 = json::parse(ticket_res2->body)["ticket"].get<std::string>();
+    ASSERT_EQ(stream_status("/v1/entities/vehicle/body/bcm/data/vin/stream?interval_ms=100&ticket=" + ticket2), 401);
+}
+
+// SOVD_REVIEW_FEEDBACK.md Task 6: not currently exploitable -- verify_token
+// always recomputes HS256 unconditionally and never branches on the header,
+// so this constructs a token whose signature is a genuinely correct
+// HMAC-SHA256 over a header claiming a *different* alg, proving the new
+// header.alg=="HS256" check (not a signature mismatch, already covered by
+// test_http_oauth2_wrong_secret_and_expired_token_rejected) is what rejects
+// it.
+void test_oauth2_verify_token_rejects_valid_signature_wrong_alg() {
+    auto b64url = [](const std::string &data) {
+        std::string out(4 * ((data.size() + 2) / 3) + 1, '\0');
+        int n = EVP_EncodeBlock(reinterpret_cast<unsigned char *>(&out[0]),
+                                 reinterpret_cast<const unsigned char *>(data.data()), static_cast<int>(data.size()));
+        out.resize(static_cast<size_t>(n));
+        for (char &c : out) {
+            if (c == '+') c = '-';
+            else if (c == '/') c = '_';
+        }
+        while (!out.empty() && out.back() == '=') out.pop_back();
+        return out;
+    };
+
+    std::string secret = "test-secret";
+    std::string header_b64 = b64url(R"({"alg":"RS256","typ":"JWT"})");
+    std::string payload_b64 = b64url(R"({"scopes":["read:data"],"exp":9999999999})");
+    std::string signing_input = header_b64 + "." + payload_b64;
+
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_len = 0;
+    HMAC(EVP_sha256(), secret.data(), static_cast<int>(secret.size()),
+         reinterpret_cast<const unsigned char *>(signing_input.data()), signing_input.size(), digest, &digest_len);
+    std::string sig_b64 = b64url(std::string(reinterpret_cast<char *>(digest), digest_len));
+    std::string forged_token = signing_input + "." + sig_b64;
+
+    sovd::server::oauth2::TokenClaims claims;
+    ASSERT_FALSE(sovd::server::oauth2::verify_token(forged_token, secret, claims));
 }
 
 // Pure MQTT packet framing -- no socket, no broker. Matches the
@@ -2060,6 +2238,9 @@ int main() {
     RUN_TEST(test_http_oauth2_valid_token_missing_scope_gets_403);
     RUN_TEST(test_http_oauth2_valid_token_with_scope_succeeds);
     RUN_TEST(test_http_security_access_scope_gates_write_beyond_execute_routines);
+    RUN_TEST(test_http_oauth2_every_real_route_requires_auth_when_enabled);
+    RUN_TEST(test_http_oauth2_stream_ticket_flow);
+    RUN_TEST(test_oauth2_verify_token_rejects_valid_signature_wrong_alg);
 
     RUN_TEST(test_mqtt_encode_connect_packet);
     RUN_TEST(test_mqtt_encode_publish_packet);

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { SovdClient, type EntityInfo } from './api/sovdClient'
+import { SovdClient, SovdError, type EntityInfo } from './api/sovdClient'
 import EntityBrowser from './views/EntityBrowser.vue'
 import FaultViewer from './views/FaultViewer.vue'
 import DataTable from './views/DataTable.vue'
@@ -10,6 +10,10 @@ import LiveChart from './views/LiveChart.vue'
 // gateway -- streaming through a Phase 4 proxy is a deliberate 501, so
 // screen 4 can't run against the gateway tier.
 const baseUrlInput = ref(import.meta.env.VITE_SOVD_BASE_URL ?? 'http://localhost:20003')
+// SOVD_REVIEW_FEEDBACK.md Task 1b: optional -- an unauthenticated server
+// (this project's default demo config) never checks this at all, matching
+// SovdClient.token's own "unset means no Authorization header" behavior.
+const tokenInput = ref('')
 const connectError = ref<string | null>(null)
 const connecting = ref(false)
 const client = ref<SovdClient | null>(null)
@@ -34,6 +38,7 @@ async function connect() {
   connecting.value = true
   const url = baseUrlInput.value.replace(/\/+$/, '')
   const c = new SovdClient(url)
+  c.token = tokenInput.value.trim() || null
   try {
     const list = await c.listEntities()
     // Root info is discovery-driven too -- shown as-is, never assumed.
@@ -44,7 +49,17 @@ async function connect() {
     entities.value = list
     client.value = c
   } catch (e) {
-    connectError.value = e instanceof Error ? e.message : String(e)
+    // SOVD_REVIEW_FEEDBACK.md Task 1b: 401 ("no/invalid token") and 403
+    // ("valid token, wrong scope") are different user problems -- the
+    // server already distinguishes them (routes.cpp's check_oauth2), so
+    // this labels which one happened instead of showing a flat error.
+    if (e instanceof SovdError && e.status === 401) {
+      connectError.value = `Not authenticated — paste a valid bearer token above (${e.message}).`
+    } else if (e instanceof SovdError && e.status === 403) {
+      connectError.value = `Authenticated, but this token lacks a required scope (${e.message}).`
+    } else {
+      connectError.value = e instanceof Error ? e.message : String(e)
+    }
   } finally {
     connecting.value = false
   }
@@ -72,6 +87,13 @@ function selectEntity(path: string) {
               type="text"
               class="field w-full max-w-xs"
               placeholder="http://localhost:20003"
+            />
+            <input
+              v-model="tokenInput"
+              type="password"
+              class="field w-full max-w-xs"
+              placeholder="bearer token (only if OAuth2 is enabled)"
+              autocomplete="off"
             />
             <button type="submit" class="btn btn-primary" :disabled="connecting">
               {{ connecting ? 'Connecting…' : client ? 'Reconnect' : 'Connect' }}

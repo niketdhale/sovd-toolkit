@@ -49,7 +49,16 @@ async function startStream() {
   error.value = null
   if (!props.path || !selectedId.value) return
 
-  const url = await props.client.streamUrl(props.path, selectedId.value, intervalMs.value)
+  // streamUrl() now mints a stream ticket first when the client has a
+  // token configured (Task 1c) -- a bearer-authenticated POST that can
+  // itself 401/403, unlike before when this was a synchronous string build.
+  let url: string
+  try {
+    url = await props.client.streamUrl(props.path, selectedId.value, intervalMs.value)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+    return
+  }
   es = new EventSource(url)
   streaming.value = true
   es.onmessage = (ev) => {

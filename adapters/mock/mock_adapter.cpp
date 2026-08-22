@@ -47,6 +47,8 @@ sovd_adapter_ctx *mock_create(const char *config_json) {
     st->data["F190"] = {'S', 'O', 'V', 'D', 'T', 'O', 'O', 'L', 'K', 'I', 'T', 'M', 'O', 'C', 'K', '0', '1'};
     st->data["010A"] = {0x32, 0xC8};
     st->data["0200"] = {0x01};
+    // 0x0210 = courtesy_light_delay (catalogs/bcm.yaml, Task 7): 0x0A -> 10s.
+    st->data["0210"] = {0x0A};
     return reinterpret_cast<sovd_adapter_ctx *>(st);
 }
 

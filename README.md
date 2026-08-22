@@ -160,12 +160,19 @@ GET /v1/entities/vehicle/body/bcm/data/battery_voltage
 ### Security posture
 
 - **OAuth2 bearer tokens** at the HTTP boundary, scope-gated per route
-  (`read:faults`, `read:data`, `execute:routines`, `execute:security_access`).
+  (`read:faults`, `read:data`, `execute:routines`, `execute:security_access`),
+  **opt-in via `SOVD_OAUTH2_SECRET`** — unset in every config this repo
+  ships, including the default demo. Default-deny: a route with no matching
+  scope-table entry still requires *a* valid token, never a silent bypass.
 - **Mutual TLS** between gateway and domain servers — both directions
   verified against a private demo CA, not the system trust store.
 - **SecurityAccess (`0x27`)** gated on *both* what the ECU demands (catalog
   `requires_security_level`) and what the client's token is allowed to ask
-  for (`execute:security_access` scope) — either alone isn't enough.
+  for (`execute:security_access` scope) — either alone isn't enough. This
+  second half **only actually runs when OAuth2 is enabled**; with it off
+  (every shipped config's default), a `requires_security_level` item is
+  reachable by any caller who can reach the server at all — enable OAuth2
+  (usage example 8) wherever that matters.
 - **Default-deny route whitelist** at the gateway tier — a route added to
   the server without an explicit whitelist entry is unreachable through the
   gateway rather than silently exposed.
@@ -275,6 +282,22 @@ Table (typed read/write widgets built purely from `/docs` — an enum
 `<select>`, a numeric input with its unit, a length-capped text field,
 nothing hardcoded per-entity), Live Chart (SSE + a hand-rolled SVG polyline).
 
+**Combined with OAuth2** (the two are independent examples above; this is
+what running them together actually looks like):
+```bash
+SOVD_OAUTH2_SECRET=demo-secret ./build/sovd_server config/domain_body_auth.yaml &
+./build/sovd_mint_token demo-secret read:data,execute:routines,read:faults 3600
+cd web && npm run dev
+# open http://localhost:5173, paste the minted token into the token field
+# next to the base URL, click Connect
+```
+The token field sends `Authorization: Bearer <token>` on every request. The
+live-chart screen can't do that itself — a browser `EventSource` has no way
+to set request headers — so it mints a short-lived, single-use ticket
+through a normal bearer-authenticated `POST .../stream-ticket` call first
+and opens the stream with that instead; this happens automatically the
+moment a token is configured, nothing to do differently on that screen.
+
 ### 7. Security monitoring
 
 ```bash
@@ -290,10 +313,27 @@ input example in `monitoring/telegraf/sovd_mqtt_input.conf.example`.
 ### 8. OAuth2-protected server
 
 ```bash
-SOVD_OAUTH2_SECRET=demo-secret ./build/sovd_server 20002 domain
+SOVD_OAUTH2_SECRET=demo-secret ./build/sovd_server config/domain_body_auth.yaml
 TOKEN=$(./build/sovd_mint_token demo-secret read:data,execute:routines 3600)
-curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:20002/v1/entities/vehicle/body/bcm/data
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:20003/v1/entities/vehicle/body/bcm/data
 ```
+OAuth2 has **no YAML config key at all** — it's `SOVD_OAUTH2_SECRET` or
+nothing, same as `SOVD_MQTT_HOST` and `SOVD_AUDIT_LOG_PATH`. A secret has no
+business sitting in a topology file that might get committed or handed to
+someone debugging an unrelated issue. `config/domain_body_auth.yaml` is the
+identical topology to `config/domain_body.yaml`, kept as a separate file for
+exactly this reason — see its own header comment.
+
+**One topology this project deliberately doesn't support**: setting
+`SOVD_OAUTH2_SECRET` on a **domain**-tier server sitting behind a gateway
+proxy. The proxy forwards `X-SOVD-Lock-Id` but never `Authorization`
+(mTLS on that hop verifies the gateway's own certificate instead of
+trusting a forwarded external bearer token — see the mTLS section above);
+a domain server that also demands a bearer token then rejects every
+gateway-proxied request with a 401 it has no way to satisfy. The supported
+split is **OAuth2 at the gateway, mTLS on the internal gateway↔domain hop**
+— set `SOVD_OAUTH2_SECRET` on the gateway tier's config, not the domain
+tier's, in a two-server topology.
 
 ---
 

@@ -46,8 +46,101 @@ domain servers (both directions — client cert required and verified,
 server cert verified against a private demo CA), and SecurityAccess
 (`0x27`) wiring for both D2 halves (catalog `requires_security_level` field
 gating what the ECU demands, `execute:security_access` OAuth2 scope gating
-who may ask). 542 assertions in `test_core` (up from 381), `test_uds_doip`
-197 (up from 180), `test_client` 32 — all passing, all committed.
+who may ask).
+
+**External review response — COMPLETE, 2026-08-22.** `SOVD_REVIEW_FEEDBACK.md`
+(checked into the repo root) is an outside review of commit `4f7f8ed` that
+built and ran every configuration rather than reading the code — it found
+one real integration gap: **Phase 7 (browser-verified 2026-08-20) and
+Phase 8's OAuth2 (landed the same day, after) were each verified honestly
+in isolation, but the combination was never tried — enabling
+`SOVD_OAUTH2_SECRET` 401'd the entire web UI**, both because the CORS
+preflight never listed `Authorization` back (so the browser blocked the
+real request before it was sent) and because a browser `EventSource` can't
+set an Authorization header at all, meaning even a fixed preflight still
+couldn't make screen 4 work. All nine tasks are done and live-verified, not
+just unit-tested:
+- **Task 1 [HIGH]**: `Authorization` added to the CORS allow-list
+  (`routes.cpp`); the web UI gained a bearer-token field
+  (`web/src/App.vue`) with 401-vs-403 distinguished in the connect error;
+  the SSE stream route now accepts a short-lived (30s) single-use ticket
+  minted by a new bearer-authenticated `POST .../stream-ticket` endpoint
+  (`server/include/sovd/server/stream_ticket.hpp`) as well as a normal
+  bearer token — `web/src/api/sovdClient.ts`'s `streamUrl()` mints one
+  automatically whenever a token is configured, so `LiveChart.vue` needed
+  no screen-specific logic. **Settled as D4** below.
+- **Task 2 [MEDIUM]**: `check_oauth2()`'s scope table flipped from
+  default-allow to default-deny — an unmatched route now requires *a*
+  valid token (falls through instead of returning `Ok` early) rather than
+  silently bypassing the check. `test_http_oauth2_every_real_route_
+  requires_auth_when_enabled` (test_core.cpp) is the drift guard, same
+  hardcoded-route-list shape as the gateway whitelist's own coverage test
+  (httplib exposes no route-introspection API, so neither test can do
+  better than an explicit list).
+- **Task 3 [MEDIUM]**: `config/domain_body_auth.yaml` demonstrates the
+  authenticated path; README states OAuth2/D2 gating's opt-in posture
+  plainly. **Correction, not a blind copy of the review's wording**: the
+  review's Task 3 claimed `SOVD_TLS_*` has "no YAML keys" alongside OAuth2/
+  MQTT/audit-log — checked against `config_loader.cpp` and that's only true
+  for the hardcoded zero-config path. The config-driven path (what every
+  shipped `config/*.yaml` actually uses) *does* have real YAML keys for TLS
+  (`server.tls: {cert, key, client_ca}`, `adapter.tls: {client_cert,
+  client_key, ca_cert}`, both already documented in this section further
+  down) — only OAuth2, MQTT, and the audit log path are genuinely env-var-
+  only in both paths. See "Env-var-only settings" below.
+- **Task 4 [MEDIUM]**: the domain-tier-auth dead end (a domain server with
+  `SOVD_OAUTH2_SECRET` set rejects every gateway-proxied request 401, since
+  the proxy deliberately never forwards `Authorization` — correct, per the
+  mTLS rule, not a bug) is now stated explicitly in README's usage example
+  8 and this file's env-var-only note below.
+- **Task 5 [LOW]**: `attach_router_catalog_if_present()` (`config_loader.cpp`)
+  wrapped in `#if defined(SOVD_HAVE_MOCK) || defined(SOVD_HAVE_UDS_DOIP)` —
+  it was only ever called from inside those blocks, so with both adapters
+  off (the proxy-only gateway build) it was an unused-function warning in
+  exactly the configuration B3's "capability reduction by linkage" argument
+  rests on. **`-DSOVD_ADAPTER_MOCK=OFF -DSOVD_ADAPTER_UDS_DOIP=OFF` is now
+  a fourth build configuration in "Build & test" below**, verified clean
+  (zero warnings, zero adapter symbols via `nm`) rather than just claimed.
+- **Task 6 [LOW]**: `verify_token()` (`oauth2.cpp`) now checks
+  `header.alg == "HS256"` after the signature check (never before it — the
+  review's own "keep signature-before-parse" note still holds). Not
+  currently exploitable (the verifier never switched on `alg` to begin
+  with), added as defense in depth against a future refactor that does.
+  `test_oauth2_verify_token_rejects_valid_signature_wrong_alg`
+  (test_core.cpp) constructs a token with a genuinely correct HMAC-SHA256
+  signature over a header claiming a different `alg`, to prove the new
+  check — not a signature mismatch — is what rejects it.
+- **Task 7 [LOW]**: `catalogs/bcm.yaml` gained `courtesy_light_delay`
+  (float, `read_write`, DID `0x0210`) — the only prior writable item
+  (`door_lock_state`) was an enum, so the numeric out-of-range/negative
+  `encode()` path and the scaled-number `<input type=number>` widget were
+  never exercised through a real HTTP `PUT`, only via direct unit tests.
+  Mock-seeded at `0x0A` (10s).
+- **Task 8 [LOW]**: `GET /` now advertises `limits.lock_ttl_ceiling_seconds`
+  (`kMaxLockTtlSeconds`) so a well-behaved client can clamp its own
+  over-ceiling TTL request before asking, rather than finding out only by
+  reading a lock-acquire response body it might not be reading. **Settled
+  as D5** below — chose "advertise the ceiling" over "reject an over-
+  ceiling request with 400" to preserve the existing clamp-and-tell-the-
+  truth design (CLAUDE.md's original resource-limits reasoning), fixing
+  only the "tell" half for a client that never reads response bodies.
+- **Task 9 [PROCESS]**: `scripts/cross_phase_check.sh` boots the relevant
+  server combinations and curls the cross-feature matrix the review's own
+  closing note named (UI × auth, UI × gateway, auth × proxy, mTLS × proxy,
+  restricted-build × each config) — runnable, not aspirational. Added to
+  **Working conventions** below as a standing rule: a feature that works
+  alone and fails in combination is not complete.
+
+542 assertions in `test_core` were the pre-review count; **583 now** (+41:
+default-deny coverage, the stream-ticket flow end-to-end via a real SSE
+connection, the CORS `Authorization` header, the alg-forgery rejection, and
+the `limits` field). `test_uds_doip` 197 (unaffected — `catalogs/bcm.yaml`'s
+new item doesn't touch any DID that fixture's fake ECU responses cover),
+`test_client` 32 (unaffected) — all passing, all four documented build
+configurations clean under `-Wall -Wextra -Wpedantic`, live-verified against
+a real running server including a real-browser click-through of the
+combined UI+OAuth2 path (Playwright MCP + Chromium) that reproduced the
+review's exact repro steps and confirmed they now work end to end.
 
 ### Blockers (server-side, must land before UI code)
 | id | What | Blocks | Where it's specified |
@@ -62,6 +155,8 @@ who may ask). 542 assertions in `test_core` (up from 381), `test_uds_doip`
 | **D1** | UI points at gateway or domain server? | **Domain server directly.** All four screens work; the two-tier topology stays a curl/CLI demo (Phase 4), not part of the UI. |
 | **D2** | SecurityAccess gating needs **both** a catalog field and an OAuth2 scope | **Recorded, implemented in Phase 8** alongside the scope work — nothing to build for Phase 7. |
 | **D3** | Browser lock lifecycle | **Short TTL (10s) + JS heartbeat + best-effort `beforeunload` release.** Not the CLI's 60s default — different failure mode (a closed tab has no RAII destructor). |
+| **D4** | SSE stream auth once OAuth2 is on — `EventSource` can't set a bearer header | **Short-lived (30s) single-use ticket**, minted by a normal bearer-authenticated `POST .../stream-ticket`, carried in the stream URL's query string. Chosen over `?access_token=...` (a real token in a URL, browser history, and any reverse-proxy log) or switching to `fetch()`+`ReadableStream` (loses `EventSource`'s automatic reconnect). Settled 2026-08-22, `SOVD_REVIEW_FEEDBACK.md` Task 1c. |
+| **D5** | Lock TTL ceiling: silently clamp, reject, or advertise? | **Clamp (unchanged) + advertise.** `GET /` now carries `limits.lock_ttl_ceiling_seconds` so a well-behaved client can self-limit; an over-ceiling request still gets `201`/`204` with the true granted TTL in the body, not a `400`. Rejecting would contradict the original "clamping is friendlier than rejecting" call; this only fixes discovery for a client not reading response bodies. Settled 2026-08-22, `SOVD_REVIEW_FEEDBACK.md` Task 8. |
 
 Full reasoning for each: **OPEN DECISIONS** section below.
 
@@ -163,11 +258,14 @@ External tester  ──SOVD/HTTP──►  Gateway / Domain HPC
 
 ---
 
-## OPEN DECISIONS — SETTLED 2026-08-20
+## OPEN DECISIONS — SETTLED 2026-08-20 (D1–D3), 2026-08-22 (D4–D5)
 
 These were **not** for an implementing agent to pick silently — each had a
-real consequence and a wrong default. All three were put to the project
-owner explicitly (not defaulted) and confirmed before any Phase 7 code.
+real consequence and a wrong default. D1–D3 were put to the project owner
+explicitly (not defaulted) and confirmed before any Phase 7 code. D4–D5
+came out of `SOVD_REVIEW_FEEDBACK.md`'s external review and were resolved
+by picking the option the review itself recommended, with reasoning
+recorded here in the same style — not agent-picked-and-unrecorded either.
 
 ### D1. Where does the web UI point — gateway or domain server? → **domain server directly**
 Streaming through a `sovd_proxy` entity is a deliberate `501` (Phase 6:
@@ -216,6 +314,59 @@ single-digit seconds):
 - `beforeunload` handler issuing `DELETE /locks/{lock_id}` as a best-effort
   extra — it will not always fire (that's exactly why the TTL must stay
   short rather than being relied on).
+
+### D4. SSE stream auth once OAuth2 is on → **short-lived single-use ticket**
+`SOVD_REVIEW_FEEDBACK.md` Task 1c, settled 2026-08-22. A browser
+`EventSource` cannot set an `Authorization` header — this is a hard browser
+API limitation, not a design gap in this project. Once `SOVD_OAUTH2_SECRET`
+is set, the SSE stream route (screen 4's whole reason to exist) can't be
+gated the same way every other route is.
+
+Three options were on the table:
+- **(a) [CHOSEN]** A new `POST /v1/entities/{path}/data/{id}/stream-ticket`
+  — normal bearer auth, `read:data` scope — mints an opaque ticket bound to
+  exactly that `(path, id)`, 30s TTL, single-use (burned on first redeem
+  regardless of outcome). The client opens `EventSource(...&ticket=...)`;
+  the stream route accepts either a normal bearer token (curl/CLI/any
+  non-browser client, unaffected) or a valid ticket. `StreamTicketStore`
+  (`server/include/sovd/server/stream_ticket.hpp`) is pure logic with an
+  injectable clock, same shape as `core/lock_manager.hpp` — no sleeping in
+  its tests.
+- **(b)** `?access_token=<bearer token>` directly in the query string —
+  rejected. The review's stated reason (this server's telemetry sink logs
+  `req.path`) turned out **not to apply** on inspection — `httplib::
+  Request::path` is the URL-decoded path with the query string already
+  split into `req.params` (`third_party/httplib.h`), so a query-string
+  token was never actually reaching the audit trail via that code path.
+  The option is still wrong for reasons that do hold regardless: a raw
+  30-minute-to-1-hour bearer token sitting in browser history and any
+  reverse-proxy access log is a materially bigger blast radius than a
+  30-second single-use ticket scoped to one `(path, id)`, independent of
+  whether *this* server's own logging happens to be one of the exposure
+  paths. Recorded here so "but the log claim was wrong" doesn't later get
+  mistaken for "so the option was fine."
+- **(c)** `fetch()` + `ReadableStream` instead of `EventSource` — can set
+  headers directly, but loses the automatic-reconnect behavior that was
+  `EventSource`'s reason for existing in Phase 7 in the first place. Would
+  have meant hand-rolling reconnect/backoff for one screen.
+
+### D5. Lock TTL ceiling: clamp silently, reject, or advertise? → **clamp + advertise**
+`SOVD_REVIEW_FEEDBACK.md` Task 8, settled 2026-08-22. `POST/PUT .../locks`
+already echoes the actually-*granted* TTL when a request exceeds
+`kMaxLockTtlSeconds` (Phase 8's original resource-limits work) — correct
+and unchanged — but a caller that never reads the response body has no way
+to know 3600 was ever a ceiling. Two ways to close that gap:
+- **(a) [CHOSEN]** Advertise `limits.lock_ttl_ceiling_seconds` in `GET /`
+  (self-description, discovered once, same place `api_versions` already
+  lives) so a well-behaved client can clamp its own request before asking.
+  Keeps the original "clamping is friendlier than rejecting" call intact —
+  this only fixes the "telling" half for a client not reading response
+  bodies, it doesn't change what happens to an over-ceiling request.
+- **(b)** Reject an over-ceiling request with `400` instead of clamping —
+  rejected as a real behavior change, not just a documentation fix,
+  contradicting Phase 8's original reasoning for why clamping was chosen
+  over rejecting in the first place (a caller asking for "as long as
+  possible" gets exactly that, not an error to negotiate down from).
 
 ### Session manager ownership — resolved
 The `SessionManager` *object* is owned per-adapter-instance (one per ECU,
@@ -339,7 +490,7 @@ runtime instance; see Phase 2 below).
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j4
-./build/test_core                      # 342 assertions
+./build/test_core                      # 583 assertions
 ./build/test_client                    # 32 assertions (Phase 5 SDK, always built)
 ./build/sovd_server 20002 domain       # port, role — hardcoded zero-config demo
 cd build && ctest --output-on-failure
@@ -393,8 +544,56 @@ combination with zero mock symbols linked in; see Phase 8's B3 writeup for
 the live verification and the reasoning on why the test binaries are
 conditional rather than partially compiled.
 
-Builds clean under `-Wall -Wextra -Wpedantic` with zero warnings in every
-configuration above. Keep it that way.
+A **fourth** configuration, both adapters off — the proxy-only gateway
+build B3's "capability reduction by linkage" argument actually rests on:
+```bash
+cmake -S . -B build -DSOVD_ADAPTER_MOCK=OFF -DSOVD_ADAPTER_UDS_DOIP=OFF
+cmake --build build -j4
+```
+Added 2026-08-22 (`SOVD_REVIEW_FEEDBACK.md` Task 5) after the review found
+this exact configuration — the only one of the four this file claimed
+clean without ever actually building — threw `-Wunused-function` on
+`attach_router_catalog_if_present()` in `config_loader.cpp`. Fixed (wrapped
+in `#if defined(SOVD_HAVE_MOCK) || defined(SOVD_HAVE_UDS_DOIP)`, it was
+only ever called from inside those blocks) and now genuinely verified
+clean, `nm`-checked for zero adapter symbols in `sovd_server`, same as B3's
+own verification a config over.
+
+Builds clean under `-Wall -Wextra -Wpedantic` with zero warnings in all
+**four** configurations above. Keep it that way.
+
+### Env-var-only settings
+
+Everything below is opt-in via an environment variable, with **no YAML
+config key at all** — checked precisely, not assumed, after
+`SOVD_REVIEW_FEEDBACK.md` Task 3 pointed out this file didn't previously
+say so anywhere a reader of only the config schema would see it:
+
+| Env var | What | YAML equivalent |
+|---|---|---|
+| `SOVD_OAUTH2_SECRET` | Enables OAuth2 bearer-token auth | **none** |
+| `SOVD_MQTT_HOST` / `SOVD_MQTT_PORT` | Security-event MQTT publish | **none** |
+| `SOVD_AUDIT_LOG_PATH` | Persists security events to a file | **none** |
+| `SOVD_CORS_ORIGINS` | CORS allow-list, hardcoded zero-config path only | `server.cors_allowed_origins:` (config-driven path) |
+| `SOVD_TLS_CERT` / `SOVD_TLS_KEY` / `SOVD_TLS_CLIENT_CA` | Server-side mTLS, hardcoded zero-config path only | `server.tls: {cert, key, client_ca}` (config-driven path) |
+| `SOVD_MDNS_ADVERTISE` | mDNS advertisement | **none** |
+
+TLS is the one the review's Task 3 got wrong (corrected in this file's
+Phase 8 follow-up section, not silently fixed): it's genuinely env-var-only
+on the *hardcoded* `./sovd_server <port> <role>` path (which never parses
+YAML at all), but every `config/*.yaml` this project ships uses the real
+`server.tls:` / `adapter.tls:` YAML keys instead — `config_loader.cpp`
+parses both. OAuth2, MQTT, and the audit log path have no config-driven
+equivalent either — a secret has no business in a file that might get
+committed or handed to someone debugging an unrelated topology issue.
+
+**Consequence worth knowing before it's confusing** (Task 4): a **domain**
+server behind a gateway proxy must never set `SOVD_OAUTH2_SECRET` itself —
+the proxy deliberately never forwards `Authorization` (mTLS on that hop
+verifies the gateway's own certificate instead of trusting a forwarded
+external bearer token), so every gateway-proxied request would 401 with no
+recourse. The supported split is **OAuth2 at the gateway tier, mTLS on the
+internal gateway↔domain hop** — see README's OAuth2 usage example.
 
 ---
 
@@ -1677,6 +1876,18 @@ else streamed).
   needed it, not a precedent.
 - Env note: owner's other projects are Windows/PowerShell (`;` not `&&`) and
   Bun-based; **this project is Linux/CMake/C++ and does not use Bun**
+- **Features are numerous enough now that combinations matter more than
+  individual features. Before marking a phase (or a follow-up) complete,
+  run the cross-phase matrix — `scripts/cross_phase_check.sh` — not just
+  each feature in isolation.** Added 2026-08-22 after
+  `SOVD_REVIEW_FEEDBACK.md`'s external review found exactly this failure
+  mode: Phase 7 (browser-verified 2026-08-20) and Phase 8's OAuth2 (landed
+  the same day, after) were each verified honestly on their own, and the
+  combination — enabling `SOVD_OAUTH2_SECRET` — 401'd the entire web UI. A
+  feature that works alone and fails in combination is not complete. The
+  script covers UI × auth, UI × gateway, auth × proxy, mTLS × proxy, and
+  restricted-build × each config — the specific combinations the review's
+  closing note named, runnable rather than aspirational.
 
 ## Recommended order
 

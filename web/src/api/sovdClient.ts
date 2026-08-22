@@ -74,6 +74,11 @@ export class SovdError extends Error {
 export class SovdClient {
   apiBase: string | null = null
   readonly baseUrl: string
+  // SOVD_REVIEW_FEEDBACK.md Task 1b: optional OAuth2 bearer token. Empty
+  // (the default) sends no Authorization header at all, so the no-auth demo
+  // path this project started with keeps working unchanged -- same
+  // "unset means no check" shape as the server's own SOVD_OAUTH2_SECRET.
+  token: string | null = null
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl
@@ -98,6 +103,7 @@ export class SovdClient {
     const headers: Record<string, string> = {}
     if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
     if (opts.lockId) headers['X-SOVD-Lock-Id'] = opts.lockId
+    if (this.token) headers['Authorization'] = `Bearer ${this.token}`
 
     let backoffMs = 200
     for (let attempt = 0; ; attempt++) {
@@ -174,15 +180,31 @@ export class SovdClient {
   // nothing if the API base was never resolved (no lock could exist yet).
   releaseLockBestEffort(path: string, lockId: string): void {
     if (!this.apiBase) return
+    const headers: Record<string, string> = { 'X-SOVD-Lock-Id': lockId }
+    if (this.token) headers['Authorization'] = `Bearer ${this.token}`
     fetch(`${this.apiBase}/entities/${path}/locks/${lockId}`, {
       method: 'DELETE',
-      headers: { 'X-SOVD-Lock-Id': lockId },
+      headers,
       keepalive: true,
     }).catch(() => {})
   }
 
+  // SOVD_REVIEW_FEEDBACK.md Task 1c: EventSource cannot set an Authorization
+  // header, so the stream endpoint can't be gated the same way every other
+  // route is once OAuth2 is on. When a token is configured, mint a
+  // short-lived single-use ticket through a normal bearer-authenticated
+  // POST first and carry *that* in the query string instead of the token
+  // itself -- 30s TTL, burned on first use, so it's useless the moment the
+  // stream has actually opened. No-op (no ticket param at all) when no
+  // token is set, matching every other "unset means no check" seam in this
+  // project -- the plain no-auth demo path is unaffected.
   async streamUrl(path: string, id: string, intervalMs: number): Promise<string> {
     const base = await this.ensureApiBase()
-    return `${base}/entities/${path}/data/${id}/stream?interval_ms=${intervalMs}`
+    let ticketParam = ''
+    if (this.token) {
+      const ticket = await this.request('POST', `/entities/${path}/data/${id}/stream-ticket`)
+      ticketParam = `&ticket=${encodeURIComponent(ticket.ticket)}`
+    }
+    return `${base}/entities/${path}/data/${id}/stream?interval_ms=${intervalMs}${ticketParam}`
   }
 }

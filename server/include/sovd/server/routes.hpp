@@ -12,6 +12,7 @@
 #include "sovd/entity_registry.hpp"
 #include "sovd/lock_manager.hpp"
 #include "sovd/server/stream_hub.hpp"
+#include "sovd/server/stream_ticket.hpp"
 
 namespace httplib {
 class Server;
@@ -141,6 +142,14 @@ private:
     // transport changes.
     void handle_stream_data(const httplib::Request &req, httplib::Response &res, const std::string &path,
                              const std::string &id_or_did);
+    // Task 1c follow-up: mints a short-lived single-use StreamTicketStore
+    // ticket for (path, id_or_did), so a browser EventSource -- which can't
+    // set an Authorization header -- can open the stream without a bearer
+    // token on the wire. Normal bearer auth (read:data scope) gates this
+    // POST itself; the ticket is what the GET .../stream request carries
+    // instead.
+    void handle_post_stream_ticket(const httplib::Request &req, httplib::Response &res, const std::string &path,
+                                    const std::string &id_or_did);
 
     const Entity *require_entity(httplib::Response &res, const std::string &path);
     bool check_lock_header(const httplib::Request &req, httplib::Response &res, const std::string &path);
@@ -198,6 +207,7 @@ private:
     StreamHub stream_hub_;
     std::vector<std::string> cors_allowed_origins_;
     std::string oauth2_secret_;
+    StreamTicketStore stream_tickets_;
 };
 
 } // namespace sovd::server

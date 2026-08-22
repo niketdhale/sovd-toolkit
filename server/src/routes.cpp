@@ -832,12 +832,21 @@ void Router::handle_stream_data(const httplib::Request &req, httplib::Response &
 // just proves "an authorized caller asked for this (path, id) recently".
 void Router::handle_post_stream_ticket(const httplib::Request &req, httplib::Response &res, const std::string &path,
                                         const std::string &id_or_did) {
-    correlation_id_for(req, res);
+    std::string corr = correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
-    std::string ticket = stream_tickets_.issue(path, id_or_did);
+    // SOVD_REVIEW_ROUND2.md Task 10: capacity-checked the same shape as
+    // handle_post_lock's kMaxConcurrentLocks -- 503/BUSY is transient and
+    // retry-worthy, distinct from a hard rejection.
+    auto ticket = stream_tickets_.issue(path, id_or_did);
+    if (!ticket) {
+        emit_event(event_sink_, "stream_ticket_denied",
+                   {{"entity", path}, {"id", id_or_did}, {"correlation_id", corr}, {"reason", "capacity"}});
+        write_error(res, 503, "BUSY", "server-wide stream-ticket capacity reached");
+        return;
+    }
     json body;
-    body["ticket"] = ticket;
+    body["ticket"] = *ticket;
     body["ttl_seconds"] = kStreamTicketTtlSeconds;
     res.status = 201;
     res.set_content(body.dump(), "application/json");

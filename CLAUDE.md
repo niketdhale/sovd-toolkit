@@ -131,16 +131,56 @@ just unit-tested:
   **Working conventions** below as a standing rule: a feature that works
   alone and fails in combination is not complete.
 
-542 assertions in `test_core` were the pre-review count; **583 now** (+41:
-default-deny coverage, the stream-ticket flow end-to-end via a real SSE
-connection, the CORS `Authorization` header, the alg-forgery rejection, and
-the `limits` field). `test_uds_doip` 197 (unaffected — `catalogs/bcm.yaml`'s
-new item doesn't touch any DID that fixture's fake ECU responses cover),
-`test_client` 32 (unaffected) — all passing, all four documented build
-configurations clean under `-Wall -Wextra -Wpedantic`, live-verified against
-a real running server including a real-browser click-through of the
-combined UI+OAuth2 path (Playwright MCP + Chromium) that reproduced the
-review's exact repro steps and confirmed they now work end to end.
+**Round 2 — COMPLETE, 2026-08-22.** `SOVD_REVIEW_ROUND2.md` (also checked
+in) rebuilt every config and independently re-ran all nine Round 1
+acceptance criteria rather than trusting the commit message — all nine
+verified, including the exact Task 1c sequence (mint → stream → replay
+rejected → wrong-`(path,id)` rejected → ticket value absent from telemetry).
+It also accepted Round 1's own self-correction on the `SOVD_TLS_*` claim as
+the right call, and found two new issues, both now fixed and live-verified:
+- **Task 10 [MEDIUM]**: `StreamTicketStore` — added two days after Phase
+  8's original "four resource limits" list was written — was the one Phase
+  8 resource with neither a cap nor a reaper; orphaned (minted-and-
+  abandoned) tickets accumulated for the process lifetime. Fixed with
+  `kMaxOutstandingTickets = 64` (`stream_ticket.hpp`, same value as
+  `kMaxConcurrentLocks`) plus an opportunistic expiry sweep inside `issue()`
+  under the mutex it already holds — no new background timer, so this
+  never touches the `wait_for`-not-`sleep_for` convention at all. Over the
+  cap: `503`/`BUSY` from `handle_post_stream_ticket`, same shape as the
+  lock route's own over-cap path. Full writeup with the fifth resource-limit
+  bullet, in the Phase 8 section below.
+- **Task 11 [LOW]**: `issue()`'s ticket randomness moved from
+  `thread_local std::mt19937_64` to OpenSSL's `RAND_bytes` — Mersenne
+  Twister is not a CSPRNG (recoverable from ~312 consecutive 64-bit
+  outputs), and unlike the correlation-id generator (which only needs to
+  avoid collision, not resist prediction — that comment was correct and is
+  unchanged), a ticket grants temporary access. OpenSSL was already linked
+  for the OAuth2 HMAC. Ticket format unchanged (`tkt-` + 32 hex chars, 36
+  total) — only the entropy source changed, not anything a client parses.
+
+`test_core` gained four pure-logic `StreamTicketStore` tests (redeem
+single-use + path-bound, expiry, sweep-on-issue with no redeem involved,
+and the capacity cap itself — all via the same injected-clock `FakeClock`
+pattern `LockManager`'s own tests use, no sleeping) plus one HTTP-level
+capacity test mirroring `test_http_lock_post_rejects_at_server_wide_
+capacity`'s shape (minting real tickets over real POSTs rather than a
+direct pre-fill, since `StreamTicketStore` isn't injected into `TestServer`
+the way `LockManager` is).
+
+**Assertion counts as of Round 2**: `test_core` **797** (up from 583 —
+Round 1 added 41, Round 2 added 214, mostly from the two capacity tests'
+per-iteration loop assertions), `test_uds_doip` 197 (unaffected),
+`test_client` 32 (unaffected) — all passing, all four build configurations
+clean, `nm` on the restricted build still shows zero mock symbols.
+**Verified live** against a real running server: minting 64 tickets then a
+65th gets a clean `503`; waiting past the 30s TTL and minting once more
+triggers the sweep and succeeds (`201`) again, proving the cap is reclaimed
+rather than permanently stuck once genuinely-abandoned tickets expire. RSS
+went from 10228 KB baseline to 11704 KB at the 64-ticket cap and stayed at
+11704 KB after the post-sweep mint — flat, not climbing further, which is
+the property that matters; it not dropping back down is glibc's allocator
+not always returning freed heap to the OS, not a sign the sweep didn't run
+(the `201` after the wait is the actual proof the map made room).
 
 ### Blockers (server-side, must land before UI code)
 | id | What | Blocks | Where it's specified |
@@ -349,6 +389,17 @@ Three options were on the table:
   headers directly, but loses the automatic-reconnect behavior that was
   `EventSource`'s reason for existing in Phase 7 in the first place. Would
   have meant hand-rolling reconnect/backoff for one screen.
+
+**Manual-testing gotcha, not a server bug (found live-verifying Task 10):**
+a bare `curl -X POST .../stream-ticket` with **no** `-d` sends neither
+`Content-Length` nor `Transfer-Encoding` at all, and `httplib::Server` then
+waits out its ~5s read timeout deciding there's no body before it proceeds
+— a real, measured ~5-second stall on every such call. `curl -d ""` (sends
+`Content-Length: 0`) fixes it instantly. Doesn't affect any client this
+project actually ships: the web UI's `fetch()` and `httplib::Client::Post`
+(the CLI, every C++ test) both send a body/`Content-Length` automatically.
+`scripts/cross_phase_check.sh` hit this in its own ticket-mint check and
+was fixed the same way — a reminder for whoever next hand-curls this route.
 
 ### D5. Lock TTL ceiling: clamp silently, reject, or advertise? → **clamp + advertise**
 `SOVD_REVIEW_FEEDBACK.md` Task 8, settled 2026-08-22. `POST/PUT .../locks`
@@ -1750,6 +1801,24 @@ else streamed).
         `main.cpp` — a native `httplib` feature, not hand-rolled. Every
         legitimate SOVD write body is a few bytes of JSON; 64KiB is generous
         headroom, not a real ceiling on anything valid.
+      - **Outstanding SSE stream tickets, added 2026-08-22** (`SOVD_REVIEW_
+        ROUND2.md` Task 10 — this list was originally "four," not five;
+        `StreamTicketStore` (Task 1c's addition, two days after this list
+        was first written) shipped with neither a cap nor a reaper, the one
+        Phase 8 resource with no bound at all). `kMaxOutstandingTickets = 64`
+        in `stream_ticket.hpp`, same value as `kMaxConcurrentLocks` for the
+        same reason — generous for real concurrent use, a real ceiling
+        against abuse. **Sweep-then-check, not a background reaper**:
+        `issue()` sweeps expired entries under the mutex it already holds
+        before checking the cap, so genuinely-abandoned tickets (an
+        `EventSource` that never connects, a closed tab) don't sit around
+        for the process lifetime the way they did before this fix, and the
+        cap is reached only by tickets that are actually concurrently
+        outstanding rather than by historical churn. No new timer thread —
+        stays clear of the `wait_for`-not-`sleep_for` convention entirely
+        by not needing a timer in the first place. Over the cap: `503`/
+        `BUSY` from `handle_post_stream_ticket`, same shape as the lock
+        route's own over-cap path.
       **Tests**: `test_registry_rejects_excessive_depth` (boundary-exact:
       depth 16 allowed, 17 rejected), `test_lock_acquire_clamps_excessive_ttl`
       / `test_lock_renew_clamps_excessive_ttl` (via `FakeClock`, proving the

@@ -109,7 +109,13 @@ TOKEN=$("$MINT" demo-secret read:data,execute:routines,read:faults 3600)
 [ "$(curl -s -H "Authorization: Bearer $TOKEN" -o /dev/null -w '%{http_code}' \
     http://127.0.0.1:20003/v1/entities/vehicle/body/bcm/data/battery_voltage)" = "200" ] &&
     pass "valid token -> 200" || fail "valid token should reach data"
-TICKET_RESP=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+# -d "" (not a bare -X POST): curl sends neither Content-Length nor
+# Transfer-Encoding for a truly bodiless POST, and httplib's server then
+# waits out its ~5s read timeout deciding there's no body to read before
+# proceeding -- a real, measured curl/httplib interaction, not a server
+# bug (a POST with an actual body, e.g. every httplib::Client::Post call in
+# test_core.cpp, never hits it). -d "" sends Content-Length: 0 and avoids it.
+TICKET_RESP=$(curl -s -X POST -d "" -H "Authorization: Bearer $TOKEN" \
     http://127.0.0.1:20003/v1/entities/vehicle/body/bcm/data/battery_voltage/stream-ticket)
 TICKET=$(printf '%s' "$TICKET_RESP" | sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p')
 STREAM_CODE=$(status_of --max-time 2 \

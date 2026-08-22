@@ -339,6 +339,74 @@ void test_mock_adapter_mode_and_operation() {
 }
 
 // ---------------------------------------------------------------------
+// StreamTicketStore (SOVD_REVIEW_ROUND2.md Tasks 10/11: bounded + sweep)
+// Pure logic, fake clock, same shape as LockManager's own tests above.
+// ---------------------------------------------------------------------
+
+void test_stream_ticket_store_redeem_is_single_use_and_path_bound() {
+    FakeClock clock;
+    sovd::server::StreamTicketStore store([&clock] { return clock(); });
+
+    auto t1 = store.issue("vehicle/body/bcm", "battery_voltage");
+    ASSERT_TRUE(t1.has_value());
+    ASSERT_TRUE(t1->rfind("tkt-", 0) == 0);
+    ASSERT_TRUE(store.redeem(*t1, "vehicle/body/bcm", "battery_voltage"));
+    ASSERT_FALSE(store.redeem(*t1, "vehicle/body/bcm", "battery_voltage")); // single-use
+
+    // Bound to (path, id): a ticket minted for one id doesn't redeem against
+    // another, and the failed attempt still consumes it (erase-then-check,
+    // same as LockManager's wrong-lock-id handling) so it can't be retried
+    // against a different guess either.
+    auto t2 = store.issue("vehicle/body/bcm", "battery_voltage");
+    ASSERT_TRUE(t2.has_value());
+    ASSERT_FALSE(store.redeem(*t2, "vehicle/body/bcm", "vin"));
+    ASSERT_FALSE(store.redeem(*t2, "vehicle/body/bcm", "battery_voltage"));
+}
+
+void test_stream_ticket_store_expired_ticket_fails_redeem() {
+    FakeClock clock;
+    sovd::server::StreamTicketStore store([&clock] { return clock(); });
+    auto t = store.issue("vehicle/body/bcm", "battery_voltage");
+    ASSERT_TRUE(t.has_value());
+    clock.advance(sovd::server::kStreamTicketTtlSeconds + 1);
+    ASSERT_FALSE(store.redeem(*t, "vehicle/body/bcm", "battery_voltage"));
+}
+
+// Task 10: issue() sweeps expired entries on its own -- nothing here ever
+// calls redeem(), proving orphaned (minted-and-abandoned) tickets don't
+// accumulate for the process lifetime the way they did before this fix.
+void test_stream_ticket_store_issue_sweeps_expired_entries() {
+    FakeClock clock;
+    sovd::server::StreamTicketStore store([&clock] { return clock(); });
+
+    for (int i = 0; i < 5; ++i) {
+        ASSERT_TRUE(store.issue("vehicle/body/bcm", "battery_voltage").has_value());
+    }
+    ASSERT_EQ(store.outstanding_count(), static_cast<size_t>(5));
+
+    clock.advance(sovd::server::kStreamTicketTtlSeconds + 1);
+    auto fresh = store.issue("vehicle/body/bcm", "battery_voltage");
+    ASSERT_TRUE(fresh.has_value());
+    ASSERT_EQ(store.outstanding_count(), static_cast<size_t>(1)); // only the fresh one survives
+}
+
+// Task 10: the cap itself, and that a sweep (not just a redeem) is what
+// makes room again.
+void test_stream_ticket_store_rejects_past_capacity() {
+    FakeClock clock;
+    sovd::server::StreamTicketStore store([&clock] { return clock(); });
+
+    for (size_t i = 0; i < sovd::server::kMaxOutstandingTickets; ++i) {
+        ASSERT_TRUE(store.issue("vehicle/body/bcm", "battery_voltage").has_value());
+    }
+    ASSERT_EQ(store.outstanding_count(), sovd::server::kMaxOutstandingTickets);
+    ASSERT_FALSE(store.issue("vehicle/body/bcm", "battery_voltage").has_value());
+
+    clock.advance(sovd::server::kStreamTicketTtlSeconds + 1);
+    ASSERT_TRUE(store.issue("vehicle/body/bcm", "battery_voltage").has_value());
+}
+
+// ---------------------------------------------------------------------
 // DID catalog (YAML -> typed definitions)
 // ---------------------------------------------------------------------
 
@@ -1572,6 +1640,27 @@ void test_http_oauth2_stream_ticket_flow() {
     ASSERT_EQ(stream_status("/v1/entities/vehicle/body/bcm/data/vin/stream?interval_ms=100&ticket=" + ticket2), 401);
 }
 
+// SOVD_REVIEW_ROUND2.md Task 10: end-to-end capacity check through real
+// HTTP, same shape as test_http_lock_post_rejects_at_server_wide_capacity
+// -- unlike that test, StreamTicketStore isn't injected into TestServer
+// from outside, so there's no direct pre-fill; this mints kMaxOutstanding-
+// Tickets real tickets over real POSTs instead of reaching in directly.
+// TestServer never calls set_oauth2_secret, so these POSTs need no token.
+void test_http_stream_ticket_post_rejects_at_server_wide_capacity() {
+    TestServer ts;
+    httplib::Client cli("127.0.0.1", ts.port);
+
+    for (size_t i = 0; i < sovd::server::kMaxOutstandingTickets; ++i) {
+        auto res = cli.Post("/v1/entities/vehicle/body/bcm/data/battery_voltage/stream-ticket", "", "application/json");
+        ASSERT_TRUE(res != nullptr);
+        ASSERT_EQ(res->status, 201);
+    }
+
+    auto at_capacity = cli.Post("/v1/entities/vehicle/body/bcm/data/battery_voltage/stream-ticket", "", "application/json");
+    ASSERT_TRUE(at_capacity != nullptr);
+    ASSERT_EQ(at_capacity->status, 503);
+}
+
 // SOVD_REVIEW_FEEDBACK.md Task 6: not currently exploitable -- verify_token
 // always recomputes HS256 unconditionally and never branches on the header,
 // so this constructs a token whose signature is a genuinely correct
@@ -2181,6 +2270,11 @@ int main() {
     RUN_TEST(test_lock_renew_clamps_excessive_ttl);
     RUN_TEST(test_lock_held_lock_count_tracks_active_locks_only);
 
+    RUN_TEST(test_stream_ticket_store_redeem_is_single_use_and_path_bound);
+    RUN_TEST(test_stream_ticket_store_expired_ticket_fails_redeem);
+    RUN_TEST(test_stream_ticket_store_issue_sweeps_expired_entries);
+    RUN_TEST(test_stream_ticket_store_rejects_past_capacity);
+
     RUN_TEST(test_mock_adapter_faults_roundtrip);
     RUN_TEST(test_mock_adapter_data_read_write);
     RUN_TEST(test_mock_adapter_mode_and_operation);
@@ -2240,6 +2334,7 @@ int main() {
     RUN_TEST(test_http_security_access_scope_gates_write_beyond_execute_routines);
     RUN_TEST(test_http_oauth2_every_real_route_requires_auth_when_enabled);
     RUN_TEST(test_http_oauth2_stream_ticket_flow);
+    RUN_TEST(test_http_stream_ticket_post_rejects_at_server_wide_capacity);
     RUN_TEST(test_oauth2_verify_token_rejects_valid_signature_wrong_alg);
 
     RUN_TEST(test_mqtt_encode_connect_packet);

@@ -161,9 +161,9 @@ DEAD_END_CODE=$(status_of http://127.0.0.1:20002/v1/entities/vehicle/body/bcm/da
 stop_all
 
 echo "== mTLS x proxy: both directions of mutual TLS through the gateway =="
-if [ ! -f certs/ca.crt ]; then
+if [ ! -f certs/ca.crt ] || [ ! -f certs/domain.crt ]; then
     echo "  (no certs/ yet -- generating demo certs first)"
-    ./scripts/generate_demo_certs.sh >/dev/null 2>&1
+    ./scripts/generate_demo_certs.sh || fail "generate_demo_certs.sh failed (see output above)"
 fi
 start_server /tmp/cross_phase_domain_mtls.log "$BIN" config/domain_body_mtls.yaml
 sleep 0.5 # HTTPS-only listener; wait_for_port's plain-HTTP probe doesn't apply

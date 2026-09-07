@@ -1,5 +1,5 @@
 // Phase 5: mDNS discovery of SOVD servers advertising `_sovd._tcp.local`
-// (CLAUDE.md's client config schema: `discovery: mdns`). Only declared/built
+// (docs/DESIGN.md's client config schema: `discovery: mdns`). Only declared/built
 // when SOVD_HAVE_MDNS is defined (needs avahi-client, see CMakeLists.txt) --
 // callers gate on that macro, matching this project's existing pattern for
 // optional compiled-in capability (SOVD_HAVE_UDS_DOIP).

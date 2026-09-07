@@ -1,8 +1,8 @@
 # sovd-toolkit — Review Round 2
 
-**For:** the implementing agent (Claude Code)
+**Scope:** follow-up external review of the repository at the given commit
 **Reviewed at:** commit `658d7a2`
-**Previous round:** `SOVD_REVIEW_FEEDBACK.md` (commit `4f7f8ed`)
+**Previous round:** `docs/reviews/round-1.md` (commit `4f7f8ed`)
 **Method:** rebuilt every configuration and re-ran every task's acceptance
 criteria independently, rather than trusting the commit message.
 
@@ -17,7 +17,7 @@ criteria independently, rather than trusting the commit message.
 | 1c | SSE works under auth via ticket | ✅ full flow below |
 | 2 | Scope table default-deny | ✅ `/v1/futurefeature`, `/v1/entities/vehicle` → 401; `GET /` → 200; `OPTIONS` → 204 |
 | 3 | Auth demo config + env-var docs | ✅ `config/domain_body_auth.yaml` present; docs correct (see note) |
-| 4 | Domain-tier-auth dead end documented | ✅ README + CLAUDE.md |
+| 4 | Domain-tier-auth dead end documented | ✅ README + docs/DESIGN.md |
 | 5 | `MOCK=OFF UDS_DOIP=OFF` warning | ✅ clean; all 4 configs build warning-free |
 | 6 | JWT `alg` check | ✅ present |
 | 7 | Writable numeric in catalog | ✅ second `read_write` item added |
@@ -141,6 +141,6 @@ resists replay and cross-entity reuse.
 Tasks 10 and 11 are both small, both post-authentication, and both in the same
 file. They can land as a single commit.
 
-**When updating CLAUDE.md:** Task 10's cap value and sweep strategy are worth a
+**When updating docs/DESIGN.md:** Task 10's cap value and sweep strategy are worth a
 line in the Phase 8 resource-limits list alongside the existing four, so the
 "every resource is bounded" claim becomes true rather than nearly true.

@@ -1,7 +1,7 @@
 // Phase 3: minimal MQTT 3.1.1 publisher — the transport behind
 // Router::EventSink. QoS0, no TLS, no subscribe: this only ever fire-and-
 // forgets already-serialized JSON lines onto the existing MQTT -> Telegraf
-// -> InfluxDB -> Grafana pipeline (CLAUDE.md). That narrow a slice of the
+// -> InfluxDB -> Grafana pipeline (docs/DESIGN.md). That narrow a slice of the
 // protocol doesn't justify pulling in libmosquitto/paho (neither is even
 // installed on this box) — same call the project already made for DoIP
 // (adapters/uds_doip/doip_transport.hpp): hand-roll the wire format, split

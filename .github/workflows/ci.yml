@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  cpp:
+    name: cpp (MOCK=${{ matrix.mock }}, UDS_DOIP=${{ matrix.uds_doip }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mock: "ON"
+            uds_doip: "OFF"
+          - mock: "OFF"
+            uds_doip: "ON"
+          - mock: "ON"
+            uds_doip: "ON"
+          - mock: "OFF"
+            uds_doip: "OFF"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
+            -DSOVD_ADAPTER_MOCK=${{ matrix.mock }} \
+            -DSOVD_ADAPTER_UDS_DOIP=${{ matrix.uds_doip }} \
+            -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wpedantic -Werror"
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Run test_core + test_client (mock build only)
+        if: matrix.mock == 'ON'
+        run: |
+          ./build/test_core
+          ./build/test_client
+
+      - name: Run test_uds_doip (uds_doip build only)
+        if: matrix.uds_doip == 'ON'
+        run: ./build/test_uds_doip
+
+      - name: Cross-phase check (full build only)
+        if: matrix.mock == 'ON' && matrix.uds_doip == 'ON'
+        # --skip-build-matrix: this job's own matrix strategy already builds
+        # all four adapter configs, so the script's internal build matrix
+        # would just duplicate that work.
+        run: bash scripts/cross_phase_check.sh --skip-build-matrix
+
+      - name: Generate SBOM
+        if: matrix.mock == 'ON' && matrix.uds_doip == 'ON'
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+
+      - name: Upload SBOM
+        if: matrix.mock == 'ON' && matrix.uds_doip == 'ON'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json
+
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+      - run: npm run build

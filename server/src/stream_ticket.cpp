@@ -39,7 +39,7 @@ std::optional<std::string> StreamTicketStore::issue(const std::string &entity_pa
     sweep_expired();
     if (tickets_.size() >= kMaxOutstandingTickets) return std::nullopt;
 
-    // SOVD_REVIEW_ROUND2.md Task 11: mt19937_64 (what generate_correlation_id
+    // docs/reviews/round-2.md Task 11: mt19937_64 (what generate_correlation_id
     // uses) is not a CSPRNG -- its internal state is recoverable from ~312
     // consecutive 64-bit outputs. A correlation id only needs to avoid
     // collision; this token grants temporary read access, so it needs to be

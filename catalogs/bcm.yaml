@@ -1,6 +1,6 @@
 # DID catalog for the body control module (bcm) mock/demo entity.
 # Per-ECU-software-version, kept separate from vehicle topology (see
-# CLAUDE.md's "DID catalog" architectural decision).
+# docs/DESIGN.md's "DID catalog" architectural decision).
 data:
   - id: vin
     did: 0xF190
@@ -21,7 +21,7 @@ data:
     access: read_write
     io_control: true
 
-  # SOVD_REVIEW_FEEDBACK.md Task 7: the only other read_write item here
+  # docs/reviews/round-1.md Task 7: the only other read_write item here
   # (door_lock_state) is an enum, so the numeric out-of-range/negative
   # encode() path (test_core.cpp's test_catalog_encode_float_*) and the
   # scaled-number <input type=number> widget in DataTable.vue were never

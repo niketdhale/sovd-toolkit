@@ -102,9 +102,9 @@ struct DataValue {
 // internally.
 DataValue parse_data_value(const nlohmann::json &j);
 
-// Retry/backoff on 503/504 only -- explicitly never on 423 (CLAUDE.md:
+// Retry/backoff on 503/504 only -- explicitly never on 423 (docs/DESIGN.md:
 // "retrying a lock conflict hammers another tester"). Defaults match the
-// client config schema documented in CLAUDE.md.
+// client config schema documented in docs/DESIGN.md.
 struct RetryPolicy {
     int max_retries = 3;
     int backoff_ms = 200; // doubles each retry

@@ -60,7 +60,7 @@ void build_topology(EntityRegistry &registry) {
 }
 #endif
 
-// Phase 8: explicit persistence decision (CLAUDE.md). Security events, not
+// Phase 8: explicit persistence decision (docs/DESIGN.md). Security events, not
 // stdout or a single MQTT publish, are what actually needs to survive a
 // process restart -- stdout is lost with the process, and a down/
 // unreachable broker means MQTT never durably lands an event at all.
@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
         router.set_role(role);
 
         // Catalog is per-ECU-software-version data, loaded independently of
-        // topology (see CLAUDE.md). Hardcoded to bcm for this demo
+        // topology (see docs/DESIGN.md). Hardcoded to bcm for this demo
         // topology; config mode reads `did_catalog:` per entity instead.
         try {
             router.attach_catalog("vehicle/body/bcm", catalog::Catalog::load_from_file("catalogs/bcm.yaml"));
@@ -151,7 +151,7 @@ int main(int argc, char **argv) {
     // MQTT is opt-in via env var regardless of mode — unset means stdout,
     // so `./sovd_server` still runs with no broker required. Two
     // publishers, two topics: security events stay separate from
-    // per-request telemetry ("an IDS should not be your APM", CLAUDE.md).
+    // per-request telemetry ("an IDS should not be your APM", docs/DESIGN.md).
     // server_id in the topic path means multi-server topology needs no
     // rework here — each server already publishes under its own name.
     std::shared_ptr<sovd::server::mqtt::MqttPublisher> events_pub;
@@ -173,7 +173,7 @@ int main(int argc, char **argv) {
     // via env var, same shape as MQTT/CORS/mDNS above/below. Composes with
     // MQTT rather than replacing it (both fire per event if both are set).
     // No job-status persistence to decide here -- async job polling is a
-    // stated non-goal (CLAUDE.md), so there's no job state to persist.
+    // stated non-goal (docs/DESIGN.md), so there's no job state to persist.
     // Locks are the other half of this decision: already correctly
     // in-memory-only, since LockManager has no persistence at all and a
     // restart already releases every held lock by construction.
@@ -244,7 +244,7 @@ int main(int argc, char **argv) {
     // derives from Server, so router.register_routes(*svr) below doesn't
     // need to know which one it got. client_ca present => mutual TLS: the
     // domain server requires and verifies the gateway's client certificate
-    // (CLAUDE.md: "must verify the gateway's certificate, not trust a
+    // (docs/DESIGN.md: "must verify the gateway's certificate, not trust a
     // forwarded external bearer token") rather than merely offering TLS.
     std::unique_ptr<httplib::Server> svr;
     if (!tls_cert.empty() && !tls_key.empty()) {

@@ -67,15 +67,15 @@ std::string uds_doip_config_json(const YAML::Node &adapter) {
 
 // Router's own catalog attachment (for /docs + named data paths) is
 // independent of whatever an adapter does with did_catalog internally (e.g.
-// uds_doip's session-escalation/io_control decisions) -- CLAUDE.md: "not a
+// uds_doip's session-escalation/io_control decisions) -- docs/DESIGN.md: "not a
 // shared runtime instance". Any adapter kind that owns real diagnostic data
 // can have one; not just uds_doip.
 //
-// SOVD_REVIEW_FEEDBACK.md Task 5: this is only ever called from inside the
+// docs/reviews/round-1.md Task 5: this is only ever called from inside the
 // SOVD_HAVE_MOCK / SOVD_HAVE_UDS_DOIP blocks below, so with both adapters
 // compiled out (the proxy-only gateway build B3 exists to enable) it was an
 // orphaned definition -- -Wunused-function in exactly the restricted build
-// CLAUDE.md's "clean in every documented configuration" claim is supposed
+// docs/DESIGN.md's "clean in every documented configuration" claim is supposed
 // to cover.
 #if defined(SOVD_HAVE_MOCK) || defined(SOVD_HAVE_UDS_DOIP)
 void attach_router_catalog_if_present(const std::string &path, const YAML::Node &adapter, Router &router) {
@@ -158,10 +158,10 @@ void attach_entity(const std::string &path, EntityType type, const YAML::Node &e
             if (tls["client_key"]) target.tls_client_key = tls["client_key"].as<std::string>();
             if (tls["ca_cert"]) target.tls_ca_cert = tls["ca_cert"].as<std::string>();
         }
-        // forward_locks is accepted (so the YAML matches CLAUDE.md's
+        // forward_locks is accepted (so the YAML matches docs/DESIGN.md's
         // documented schema) but not branched on: locks are always
         // forwarded for a proxied entity, never cached locally, per
-        // CLAUDE.md's "NEVER cache lock state locally" -- it's not a toggle.
+        // docs/DESIGN.md's "NEVER cache lock state locally" -- it's not a toggle.
         router.attach_proxy(path, std::move(target));
         return;
     }

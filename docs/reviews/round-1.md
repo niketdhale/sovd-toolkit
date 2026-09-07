@@ -1,11 +1,11 @@
 # sovd-toolkit — Review Feedback & Action Items
 
-**For:** the implementing agent (Claude Code)
+**Scope:** external review of the repository at the given commit
 **Reviewed at:** commit `4f7f8ed`
 **Method:** built and ran every configuration; all findings reproduced live, not
 inferred from reading.
 
-Read this alongside `CLAUDE.md`. Nothing here changes a settled architectural
+Read this alongside `docs/DESIGN.md`. Nothing here changes a settled architectural
 decision — these are integration gaps and hardening items on top of work that is
 otherwise sound.
 
@@ -25,7 +25,7 @@ enough that a well-meaning refactor could break them.
 | 401 vs 403 distinction | unauthenticated → 401, wrong scope → 403 |
 | `alg=none` forgery, expired token | both → 401 |
 | CORS allow-list | disallowed origin gets **no** `ACAO`; never `*` |
-| Proxy does **not** forward `Authorization` | deliberate, per CLAUDE.md's mTLS rule — **do not "fix" this** |
+| Proxy does **not** forward `Authorization` | deliberate, per docs/DESIGN.md's mTLS rule — **do not "fix" this** |
 | Two-tier typed read | `{"value":13.0,"unit":"V"}` through a gateway with no catalog |
 | SSE through proxy → 501 | documented behaviour |
 | B1 validation | bad enum → 400 w/ `/docs` pointer; read-only → 400; **raw hex write still 204** |
@@ -92,7 +92,7 @@ written straight into the audit trail — worse here than in a typical web app.
    (add the ticket param to a redaction list in the telemetry sink).
 
 Alternatives, if you prefer, with their costs — pick one and record the choice
-in CLAUDE.md as a settled decision:
+in docs/DESIGN.md as a settled decision:
 - `fetch()` + `ReadableStream` instead of `EventSource`: can set headers, loses
   the automatic reconnect that motivated `EventSource`.
 - Cookie auth for the stream endpoint only: simplest, adds CSRF surface to a
@@ -150,10 +150,10 @@ The feature is correct and unit-tested. The *default posture* is the problem.
 1. Add `config/domain_body_auth.yaml` demonstrating the authenticated path.
 2. In README's security-posture section, state plainly that OAuth2 is opt-in and
    that `requires_security_level` gating **depends on it being enabled**.
-3. Document in CLAUDE.md that `SOVD_OAUTH2_SECRET`, `SOVD_AUDIT_LOG_PATH`,
+3. Document in docs/DESIGN.md that `SOVD_OAUTH2_SECRET`, `SOVD_AUDIT_LOG_PATH`,
    `SOVD_MQTT_HOST`, and the `SOVD_TLS_*` paths are **env-var only, with no YAML
    keys**. Env-var for the secret is the right call — secrets don't belong in a
-   config file — but the config schema in CLAUDE.md doesn't mention it, so
+   config file — but the config schema in docs/DESIGN.md doesn't mention it, so
    someone reading only the YAML concludes auth doesn't exist.
 
 ---
@@ -161,7 +161,7 @@ The feature is correct and unit-tested. The *default posture* is the problem.
 ## TASK 4 — [MEDIUM] Document the domain-tier-auth dead end
 
 The proxy forwards `X-SOVD-Lock-Id` but deliberately **not** `Authorization`
-(`routes.cpp:545`). **This is correct** per CLAUDE.md's rule that the internal
+(`routes.cpp:545`). **This is correct** per docs/DESIGN.md's rule that the internal
 hop verifies the gateway's certificate rather than trusting a forwarded external
 token. Leave the behaviour alone.
 
@@ -170,7 +170,7 @@ But the consequence is undocumented: if a **domain** server also sets
 recourse. The supported topology is *OAuth2 at the gateway, mTLS on the internal
 hop*.
 
-**Change:** state this explicitly in CLAUDE.md (Phase 8 section) and README. The
+**Change:** state this explicitly in docs/DESIGN.md (Phase 8 section) and README. The
 failure mode is confusing and looks like a proxy bug.
 
 ---
@@ -188,7 +188,7 @@ orphaned.
 
 Minor in itself — but this is the **proxy-only gateway**, precisely the
 configuration Phase 8's "capability reduction by linkage" argument rests on, and
-CLAUDE.md claims clean warnings "in every documented configuration."
+docs/DESIGN.md claims clean warnings "in every documented configuration."
 
 **Change:** wrap the helper in
 `#if defined(SOVD_HAVE_MOCK) || defined(SOVD_HAVE_UDS_DOIP)`.
@@ -240,7 +240,7 @@ The failure mode behind Task 1 was **each phase verified honestly in isolation,
 the combination never**. Both Phase 7 and Phase 8 claim live verification and
 both claims were true.
 
-**Change:** add to CLAUDE.md's Working Conventions —
+**Change:** add to docs/DESIGN.md's Working Conventions —
 
 > Features are now numerous enough that combinations matter more than individual
 > features. Before marking a phase complete, run the cross-phase matrix: UI × auth,
@@ -280,6 +280,6 @@ Task 1 is a seam between two phases finished on the same day, not a design flaw.
 But it is findable in five minutes by anyone who sets `SOVD_OAUTH2_SECRET` and
 opens the UI, so fix it before this project is shown to anyone.
 
-**When updating CLAUDE.md after this work:** record 1c's SSE choice and 8's TTL
+**When updating docs/DESIGN.md after this work:** record 1c's SSE choice and 8's TTL
 choice as *settled decisions* with reasoning, in the same style as the existing
 D1/D2/D3 entries — so they don't get relitigated later.

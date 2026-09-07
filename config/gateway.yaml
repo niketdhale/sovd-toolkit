@@ -1,5 +1,5 @@
 # Gateway-tier server (Phase 4 two-tier demo): no ECU-facing adapter, no DID
-# catalogs at all (CLAUDE.md) -- every leaf entity is proxied to
+# catalogs at all (docs/DESIGN.md) -- every leaf entity is proxied to
 # config/domain_body.yaml's server instead. Run both on one host:
 #   ./sovd_server config/domain_body.yaml   (port 20003)
 #   ./sovd_server config/gateway.yaml       (port 20002)

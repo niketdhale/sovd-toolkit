@@ -3,7 +3,7 @@
 // server-side support, not just client-side bookkeeping — a background
 // thread renews the lock at ttl/2 via the new PUT /locks/{id} endpoint
 // (routes.cpp), so a short TTL doesn't expire out from under a long-running
-// operation. CLAUDE.md's stated reason: "a tester that crashes holding a
+// operation. docs/DESIGN.md's stated reason: "a tester that crashes holding a
 // 3600s lock bricks the entity until expiry" — the fix is a short TTL kept
 // alive by heartbeat, not one long TTL requested upfront, so a crash (which
 // stops the heartbeat with it) still self-heals on the *original* short

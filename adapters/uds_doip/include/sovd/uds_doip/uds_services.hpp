@@ -1,5 +1,5 @@
 // uds_services — UDS (ISO 14229-1) request/response byte encode/decode for
-// exactly the services the SOVD -> UDS mapping table (CLAUDE.md) needs.
+// exactly the services the SOVD -> UDS mapping table (docs/DESIGN.md) needs.
 // Pure logic: no sockets, no DoIP framing (that's doip_transport/protocol),
 // fully unit-testable on its own.
 #pragma once

@@ -74,7 +74,7 @@ void write_error(httplib::Response &res, int status, const std::string &code, co
 // derived from httplib's internal handler table (it doesn't expose one to
 // introspect) so this is an auditable security policy, not an accident of
 // whatever got registered. A gateway forwards the same resource surface a
-// domain server answers directly (CLAUDE.md's role model), so today this
+// domain server answers directly (docs/DESIGN.md's role model), so today this
 // mirrors every real route; the point is a *future* route added to
 // register_routes() without a matching entry here is unreachable through a
 // gateway by default instead of silently exposed. test_core has a drift
@@ -107,7 +107,7 @@ bool gateway_route_allowed(const std::string &method, const std::string &path) {
 }
 
 // Phase 8: scope required per route, matching exactly the three example
-// scopes CLAUDE.md's client config schema already sketched in Phase 1
+// scopes docs/DESIGN.md's client config schema already sketched in Phase 1
 // (read:faults, read:data, execute:routines) rather than inventing finer-
 // grained ones. A null scope means "any authenticated caller" -- topology
 // listing and /docs are self-description, not diagnostic data (the same
@@ -115,7 +115,7 @@ bool gateway_route_allowed(const std::string &method, const std::string &path) {
 // 501), so they're gated on having *a* valid token but no specific scope.
 // PUT data, POST modes/operations, and every lock verb are all mutating/
 // privileged actions and share execute:routines rather than each getting
-// its own scope -- CLAUDE.md's sketch never listed more than these three.
+// its own scope -- docs/DESIGN.md's sketch never listed more than these three.
 struct ScopedRoute {
     const char *method;
     std::regex pattern;
@@ -156,7 +156,7 @@ enum class OAuth2Result { Ok, Unauthorized, Forbidden };
 // check inside handle_stream_data, where the entity path/id are already
 // parsed out of the URL.
 //
-// SOVD_REVIEW_FEEDBACK.md Task 2: everything else is default-DENY, not
+// docs/reviews/round-1.md Task 2: everything else is default-DENY, not
 // default-allow. Originally an unmatched (method, path) returned Ok --
 // meaning a route added to register_routes() later without a matching
 // entry here was silently reachable with no token at all, the opposite
@@ -378,11 +378,11 @@ void Router::register_routes(httplib::Server &svr) {
     // Root is deliberately unversioned: a client that has never seen this
     // server before hits / first to learn what's available (api_versions)
     // before it knows which prefix to use. Everything else is versioned —
-    // path prefix over an Accept header, settled in CLAUDE.md: uglier, but
+    // path prefix over an Accept header, settled in docs/DESIGN.md: uglier, but
     // unambiguous, and safety-adjacent APIs shouldn't leave version
     // negotiation implicit.
     // Phase 3: per-request latency on a separate telemetry sink, not mixed
-    // into the security event stream (CLAUDE.md: "an IDS should not be your
+    // into the security event stream (docs/DESIGN.md: "an IDS should not be your
     // APM"). One hook pair here covers every route without instrumenting
     // each handler individually.
     //
@@ -404,7 +404,7 @@ void Router::register_routes(httplib::Server &svr) {
                 // preflight that only allows Content-Type silently breaks
                 // every lock-gated write and every correlated request from
                 // the browser, since those headers wouldn't pass preflight.
-                // Authorization added by SOVD_REVIEW_FEEDBACK.md Task 1a --
+                // Authorization added by docs/reviews/round-1.md Task 1a --
                 // this list predates Phase 8's OAuth2 (B2 was Phase 7, mid-
                 // 2026-08-20; OAuth2 landed the same day, after). Without it
                 // a preflight carrying `Authorization: Bearer ...` never
@@ -424,7 +424,7 @@ void Router::register_routes(httplib::Server &svr) {
         // Phase 8: default-deny at the gateway tier. Checked here, before
         // any route handler runs, so a request that doesn't match the
         // whitelist never reaches entity lookup / adapter dispatch at all --
-        // "capability reduction by linkage > runtime checks" (CLAUDE.md)
+        // "capability reduction by linkage > runtime checks" (docs/DESIGN.md)
         // applied at the HTTP layer, since role can't be enforced by
         // linkage alone when gateway and domain share one binary.
         if (role_ == "gateway" && !gateway_route_allowed(req.method, req.path)) {
@@ -636,8 +636,8 @@ bool Router::check_lock_header(const httplib::Request &req, httplib::Response &r
 
 void Router::handle_root(const httplib::Request &req, httplib::Response &res) {
     correlation_id_for(req, res);
-    // Phase 8 follow-up (SOVD_REVIEW_FEEDBACK.md Task 8, settled as D4 in
-    // CLAUDE.md): a POST/PUT .../locks response already echoes the actual
+    // Phase 8 follow-up (docs/reviews/round-1.md Task 8, settled as D4 in
+    // docs/DESIGN.md): a POST/PUT .../locks response already echoes the actual
     // *granted* TTL when a request exceeds kMaxLockTtlSeconds, but a caller
     // that never reads the response body has no way to know 3600 was ever a
     // ceiling rather than "whatever I asked for was honored". Advertising it
@@ -645,7 +645,7 @@ void Router::handle_root(const httplib::Request &req, httplib::Response &res) {
     // already lives -- lets a well-behaved client clamp its own request
     // instead of finding out after the fact. Chosen over rejecting an
     // over-ceiling request with 400: clamping-and-telling-the-truth was
-    // already the settled design (CLAUDE.md's original resource-limits
+    // already the settled design (docs/DESIGN.md's original resource-limits
     // writeup), this only fixes the "telling" part for a client that isn't
     // reading response bodies.
     json body = {
@@ -835,7 +835,7 @@ void Router::handle_post_stream_ticket(const httplib::Request &req, httplib::Res
     std::string corr = correlation_id_for(req, res);
     const Entity *e = require_entity(res, path);
     if (!e) return;
-    // SOVD_REVIEW_ROUND2.md Task 10: capacity-checked the same shape as
+    // docs/reviews/round-2.md Task 10: capacity-checked the same shape as
     // handle_post_lock's kMaxConcurrentLocks -- 503/BUSY is transient and
     // retry-worthy, distinct from a hard rejection.
     auto ticket = stream_tickets_.issue(path, id_or_did);
@@ -875,7 +875,7 @@ void Router::handle_get_data_batch(const httplib::Request &req, httplib::Respons
 
     // Partial failure doesn't fail the whole batch — matches the "one
     // unreachable ECU must not fail the whole entity listing" graceful-
-    // degradation principle (CLAUDE.md, Phase 4), applied one level down:
+    // degradation principle (docs/DESIGN.md, Phase 4), applied one level down:
     // one stale/removed id in a 30-item batch shouldn't force 30 retries.
     const catalog::Catalog *cat = find_catalog(path);
     json items = json::array();
@@ -1082,7 +1082,7 @@ void Router::handle_post_lock(const httplib::Request &req, httplib::Response &re
 
     // Phase 8: server-wide cap on concurrently held locks, which -- since
     // session escalation only ever happens from a lock-gated call
-    // (CLAUDE.md's settled session-manager-ownership decision) -- doubles
+    // (docs/DESIGN.md's settled session-manager-ownership decision) -- doubles
     // as a cap on concurrently escalated UDS sessions with no separate
     // session-tracking needed. A capacity rejection is BUSY/503 (transient,
     // retry-worthy), distinct from LOCKED/423 (a specific conflict that
@@ -1164,7 +1164,7 @@ void Router::handle_delete_lock(const httplib::Request &req, httplib::Response &
 
     switch (locks_.release(path, lock_id)) {
         case LockReleaseResult::Released:
-            // Session lifetime follows lock lifetime (CLAUDE.md's "Session
+            // Session lifetime follows lock lifetime (docs/DESIGN.md's "Session
             // manager ownership"): tear down whatever session-like state
             // the backend opened for this lock, via the same set_mode
             // entry point a client could call directly. core/server never

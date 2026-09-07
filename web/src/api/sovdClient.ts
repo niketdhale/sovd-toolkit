@@ -1,9 +1,9 @@
 // Phase 7: browser SDK, mirroring client/include/sovd/client/sovd_client.hpp's
 // shape (same wire format, same rules) rather than reinventing them:
-// - Discover the API version from `/` instead of hardcoding `/v1/` (CLAUDE.md:
+// - Discover the API version from `/` instead of hardcoding `/v1/` (docs/DESIGN.md:
 //   "/" is deliberately unversioned so a client can read api_versions before
 //   it knows which prefix to use).
-// - Retry only 503/504, never 423 (CLAUDE.md: retrying a lock conflict just
+// - Retry only 503/504, never 423 (docs/DESIGN.md: retrying a lock conflict just
 //   hammers whoever holds it).
 
 export interface EntityInfo {
@@ -74,7 +74,7 @@ export class SovdError extends Error {
 export class SovdClient {
   apiBase: string | null = null
   readonly baseUrl: string
-  // SOVD_REVIEW_FEEDBACK.md Task 1b: optional OAuth2 bearer token. Empty
+  // docs/reviews/round-1.md Task 1b: optional OAuth2 bearer token. Empty
   // (the default) sends no Authorization header at all, so the no-auth demo
   // path this project started with keeps working unchanged -- same
   // "unset means no check" shape as the server's own SOVD_OAUTH2_SECRET.
@@ -189,7 +189,7 @@ export class SovdClient {
     }).catch(() => {})
   }
 
-  // SOVD_REVIEW_FEEDBACK.md Task 1c: EventSource cannot set an Authorization
+  // docs/reviews/round-1.md Task 1c: EventSource cannot set an Authorization
   // header, so the stream endpoint can't be gated the same way every other
   // route is once OAuth2 is on. When a token is configured, mint a
   // short-lived single-use ticket through a normal bearer-authenticated

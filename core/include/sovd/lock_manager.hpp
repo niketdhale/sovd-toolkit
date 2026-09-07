@@ -51,7 +51,7 @@ public:
     // Phase 8: number of currently held (unexpired) locks server-wide.
     // Doubles as an upper bound on concurrently escalated UDS sessions
     // without LockManager needing to know sessions exist at all: escalation
-    // only ever happens from a lock-gated call (CLAUDE.md's settled session-
+    // only ever happens from a lock-gated call (docs/DESIGN.md's settled session-
     // manager-ownership decision), so "how many entities are locked right
     // now" already bounds "how many entities could have an escalated
     // session right now." The policy decision (what the cap is, what error

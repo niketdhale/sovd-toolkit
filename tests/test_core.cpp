@@ -244,7 +244,7 @@ void test_lock_renew_clamps_excessive_ttl() {
 }
 
 // Phase 8: held_lock_count() is the mechanism handle_post_lock's
-// server-wide capacity check reads -- and, per CLAUDE.md's settled
+// server-wide capacity check reads -- and, per docs/DESIGN.md's settled
 // session-manager-ownership decision (escalation is always lock-gated),
 // doubles as a bound on concurrently escalated UDS sessions with no
 // separate session tracking. Not tied to real registered entities --
@@ -339,7 +339,7 @@ void test_mock_adapter_mode_and_operation() {
 }
 
 // ---------------------------------------------------------------------
-// StreamTicketStore (SOVD_REVIEW_ROUND2.md Tasks 10/11: bounded + sweep)
+// StreamTicketStore (docs/reviews/round-2.md Tasks 10/11: bounded + sweep)
 // Pure logic, fake clock, same shape as LockManager's own tests above.
 // ---------------------------------------------------------------------
 
@@ -499,7 +499,7 @@ void test_catalog_enum_values_parsed() {
 }
 
 void test_catalog_decode_float_matches_worked_example() {
-    // Matches CLAUDE.md's path-mapping example: 0x32C8 * 0.001 == 13.0
+    // Matches docs/DESIGN.md's path-mapping example: 0x32C8 * 0.001 == 13.0
     Catalog cat = Catalog::load_from_string(kSampleCatalogYaml);
     const DataItem *v = cat.find_by_id("battery_voltage");
     auto decoded = Catalog::decode(*v, {0x32, 0xC8});
@@ -781,7 +781,7 @@ void test_http_root_and_entities() {
     ASSERT_EQ(root_body["role"].get<std::string>(), "domain");
     ASSERT_EQ(root_body["api_versions"].size(), static_cast<size_t>(1));
     ASSERT_EQ(root_body["api_versions"][0].get<std::string>(), "v1");
-    // SOVD_REVIEW_FEEDBACK.md Task 8 / CLAUDE.md's settled D4: a caller that
+    // docs/reviews/round-1.md Task 8 / docs/DESIGN.md's settled D4: a caller that
     // never reads the lock-acquire response body has no way to learn 3600 is
     // a ceiling rather than whatever it asked for -- advertised here so a
     // well-behaved client can clamp its own request first.
@@ -1216,14 +1216,14 @@ void test_http_telemetry_sink_separate_from_event_sink() {
     // set_event_sink(), which handlers call before res.status is even set.
     // So the client can legitimately observe the response before the
     // server-side logger call runs; a bounded poll (not a blind sleep) is
-    // the same real-async-hazard tradeoff CLAUDE.md documents for
+    // the same real-async-hazard tradeoff docs/DESIGN.md documents for
     // session_manager's heartbeat tests, applied to a different cause.
     for (int waited_ms = 0; telemetry.empty() && waited_ms < 200; waited_ms += 5) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
     // A plain GET emits no security event, but does emit telemetry -- the
-    // two sinks are independent (CLAUDE.md: "an IDS should not be your APM").
+    // two sinks are independent (docs/DESIGN.md: "an IDS should not be your APM").
     ASSERT_EQ(events.size(), static_cast<size_t>(0));
     ASSERT_EQ(telemetry.size(), static_cast<size_t>(1));
 
@@ -1284,7 +1284,7 @@ void test_http_cors_preflight_options() {
     std::string allow_headers = preflight->get_header_value("Access-Control-Allow-Headers");
     ASSERT_TRUE(allow_headers.find("X-SOVD-Lock-Id") != std::string::npos);
     ASSERT_TRUE(allow_headers.find("X-SOVD-Correlation-Id") != std::string::npos);
-    // SOVD_REVIEW_FEEDBACK.md Task 1a: without Authorization here, a
+    // docs/reviews/round-1.md Task 1a: without Authorization here, a
     // preflight carrying `Authorization: Bearer ...` never lists it back,
     // so the browser blocks the real request before it's sent -- the whole
     // web UI 401s the instant OAuth2 is enabled.
@@ -1514,7 +1514,7 @@ void test_http_security_access_scope_gates_write_beyond_execute_routines() {
     ASSERT_EQ(unaffected->status, 204);
 }
 
-// SOVD_REVIEW_FEEDBACK.md Task 2: default-DENY, not default-allow. Walks
+// docs/reviews/round-1.md Task 2: default-DENY, not default-allow. Walks
 // every route register_routes() actually registers (same hardcoded list
 // test_http_gateway_whitelist_allows_every_real_route uses, for the same
 // reason -- httplib exposes no route-introspection API) with OAuth2 enabled
@@ -1640,7 +1640,7 @@ void test_http_oauth2_stream_ticket_flow() {
     ASSERT_EQ(stream_status("/v1/entities/vehicle/body/bcm/data/vin/stream?interval_ms=100&ticket=" + ticket2), 401);
 }
 
-// SOVD_REVIEW_ROUND2.md Task 10: end-to-end capacity check through real
+// docs/reviews/round-2.md Task 10: end-to-end capacity check through real
 // HTTP, same shape as test_http_lock_post_rejects_at_server_wide_capacity
 // -- unlike that test, StreamTicketStore isn't injected into TestServer
 // from outside, so there's no direct pre-fill; this mints kMaxOutstanding-
@@ -1661,7 +1661,7 @@ void test_http_stream_ticket_post_rejects_at_server_wide_capacity() {
     ASSERT_EQ(at_capacity->status, 503);
 }
 
-// SOVD_REVIEW_FEEDBACK.md Task 6: not currently exploitable -- verify_token
+// docs/reviews/round-1.md Task 6: not currently exploitable -- verify_token
 // always recomputes HS256 unconditionally and never branches on the header,
 // so this constructs a token whose signature is a genuinely correct
 // HMAC-SHA256 over a header claiming a *different* alg, proving the new
@@ -1849,7 +1849,7 @@ entities:
 // Phase 8 (mTLS): live wire-level mTLS enforcement (handshake succeeds with
 // the right client cert, is rejected with none or a wrong-CA one) was
 // verified against real running servers with real openssl-generated certs
-// (see CLAUDE.md's mTLS writeup) -- not reproduced here, since spinning up
+// (see docs/DESIGN.md's mTLS writeup) -- not reproduced here, since spinning up
 // SSLServer/SSLClient inside the test binary would just be re-testing
 // OpenSSL's own TLS stack. What this suite covers is the piece this
 // project's own code is actually responsible for: that config_loader
@@ -1916,7 +1916,7 @@ entities:
 
 // The real Phase 4 exit criterion: two live servers, gateway config-loaded
 // with a sovd_proxy pointing at the domain server's dynamic port. Proves
-// the properties CLAUDE.md's original vtable-based sketch couldn't have
+// the properties docs/DESIGN.md's original vtable-based sketch couldn't have
 // (see ProxyTarget's comment in routes.hpp): typed /docs and named-id
 // decode pass through with zero catalog on the gateway, and locks acquired
 // through the gateway are actually held on the domain server, not cached
@@ -2131,7 +2131,7 @@ void test_http_proxy_bounded_queue_returns_503_on_concurrent_request() {
 // Phase 6: StreamHub -- the shared poller behind SSE. Genuinely
 // wall-clock-driven background threads (not a lazily-checked TTL), so like
 // session_manager's heartbeat tests, these use short real intervals with
-// bounded waits rather than an injectable clock (see CLAUDE.md).
+// bounded waits rather than an injectable clock (see docs/DESIGN.md).
 
 using sovd::server::StreamHub;
 

@@ -1,7 +1,7 @@
 // uds_doip_adapter — wires transport + session manager + UDS services +
 // NRC map + (optionally) a catalog into a sovd_vtable_t. All UDS/DoIP
 // complexity stays behind this file; core/ and server/ never learn it
-// exists (CLAUDE.md's layering rule).
+// exists (docs/DESIGN.md's layering rule).
 //
 // Expected create() config_json shape (Phase 4's config loader will
 // eventually build this from the topology YAML's `adapter:` block):
@@ -283,7 +283,7 @@ sovd_result_t uds_doip_set_mode(sovd_adapter_ctx *raw_ctx, const char *entity_pa
     if (!mode) return SOVD_BAD_REQUEST;
 
     // "default" is also how routes.cpp tears a session down on lock
-    // release (CLAUDE.md's "Session manager ownership") — same path either
+    // release (docs/DESIGN.md's "Session manager ownership") — same path either
     // way, whether a client asked for it or the lock lifecycle did.
     if (std::strcmp(mode, "default") == 0) {
         return c->session_mgr->revert_to_default() ? SOVD_OK : SOVD_TRANSPORT;

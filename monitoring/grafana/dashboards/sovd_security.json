@@ -57,7 +57,7 @@
       "type": "timeseries",
       "gridPos": { "h": 9, "w": 12, "x": 12, "y": 10 },
       "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
-      "description": "lock_release_mismatch (wrong lock_id on release) and repeated lock_denied are the two CLAUDE.md alert signatures for this phase -- a probing or misbehaving client.",
+      "description": "lock_release_mismatch (wrong lock_id on release) and repeated lock_denied are the two docs/DESIGN.md alert signatures for this phase -- a probing or misbehaving client.",
       "targets": [
         {
           "query": "SELECT count(\"correlation_id\") FROM sovd_events WHERE event =~ /^lock_denied$|^lock_release_mismatch$/ AND $timeFilter GROUP BY time($__interval) fill(0)",

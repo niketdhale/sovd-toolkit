@@ -1,12 +1,12 @@
 # Domain-tier server, identical topology to config/domain_body.yaml, kept as
 # a separate file to make one thing obvious by its existence: OAuth2 has no
-# YAML keys at all (SOVD_REVIEW_FEEDBACK.md Task 3). Unlike CORS
+# YAML keys at all (docs/reviews/round-1.md Task 3). Unlike CORS
 # (cors_allowed_origins below) or TLS (server.tls: -- see
 # config/domain_body_mtls.yaml), there is no `oauth2:` block this file could
 # have. Auth is turned on entirely by the SOVD_OAUTH2_SECRET env var at
 # process start -- a secret has no business living in a config file that
 # might get committed, logged, or handed to someone debugging a topology
-# issue who has no need to see it. See CLAUDE.md's Phase 8 section for the
+# issue who has no need to see it. See docs/DESIGN.md's Phase 8 section for the
 # full list of env-var-only settings.
 #
 # Run it:

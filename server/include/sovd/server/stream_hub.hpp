@@ -1,5 +1,5 @@
 // Phase 6: the shared poller behind every SSE data subscription. "Backed by
-// adapter-level periodic read, not per-request polling" (CLAUDE.md) means
+// adapter-level periodic read, not per-request polling" (docs/DESIGN.md) means
 // N browser tabs watching the same data point must not turn into N
 // independent timers each hitting the adapter/UDS bus — they share ONE
 // poller, keyed by (path, id, interval_ms); the last unsubscribe stops it.

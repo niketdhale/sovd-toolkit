@@ -1,6 +1,6 @@
 # Domain-tier server (Phase 4 two-tier demo): owns the real backends. Uses
 # the mock adapter, not uds_doip -- there's no live DoIP target to ship
-# alongside this demo (same call Phase 2 already made; see CLAUDE.md).
+# alongside this demo (same call Phase 2 already made; see docs/DESIGN.md).
 # Swap `kind: mock` for `kind: uds_doip` (+ its gateway_ip/logical_address
 # fields) to point this at a real ECU without touching the gateway config
 # at all -- that's the whole point of the adapter seam.

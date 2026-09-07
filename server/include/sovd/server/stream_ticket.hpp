@@ -2,7 +2,7 @@
 // endpoint. Pure logic: no HTTP, no sockets, no JSON, no sleeping (clock is
 // injectable, same shape as core/lock_manager.hpp).
 //
-// Why this exists (SOVD_REVIEW_FEEDBACK.md Task 1c): the browser's
+// Why this exists (docs/reviews/round-1.md Task 1c): the browser's
 // EventSource API cannot set an Authorization header, so once OAuth2 is
 // enabled the SSE stream route can't be gated the same way every other route
 // is. A client instead POSTs (with a normal bearer token) to mint a ticket
@@ -27,7 +27,7 @@ using SteadyClock = std::function<std::chrono::steady_clock::time_point()>;
 
 inline constexpr int kStreamTicketTtlSeconds = 30;
 
-// SOVD_REVIEW_ROUND2.md Task 10: this project's stated Phase 8 position is
+// docs/reviews/round-2.md Task 10: this project's stated Phase 8 position is
 // that unbounded anything is a DoS on a safety-adjacent interface --
 // LockManager purges stale entries on access and routes.cpp caps concurrent
 // locks at kMaxConcurrentLocks (64). This mirrors that same cap so the

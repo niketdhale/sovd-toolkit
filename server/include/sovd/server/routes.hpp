@@ -24,16 +24,16 @@ class Client;
 namespace sovd::server {
 
 // Phase 4: a local entity path can be backed by a remote SOVD server
-// instead of a local adapter. CLAUDE.md's original sketch ("adapters/
+// instead of a local adapter. docs/DESIGN.md's original sketch ("adapters/
 // sovd_proxy — same vtable") doesn't survive Phase 1's typed /docs and
 // named-id decoding: the vtable's read_data only carries raw
 // sovd_buffer_t bytes, but a proxy has to pass through the remote's
 // already-decoded JSON (battery_voltage -> 13.0 V) verbatim — and it must,
-// since "gateway needs no DID catalogs at all" (CLAUDE.md) rules out
+// since "gateway needs no DID catalogs at all" (docs/DESIGN.md) rules out
 // decoding locally. So this is a Router-level HTTP-forwarding table, not a
 // vtable adapter: same one-lookup-then-dispatch shape as find_catalog(),
 // just forwarding the whole request/response instead of decoding bytes.
-// Locks are always forwarded too (never a toggle) — CLAUDE.md: "forward
+// Locks are always forwarded too (never a toggle) — docs/DESIGN.md: "forward
 // must NEVER cache lock state locally."
 struct ProxyTarget {
     std::string base_url;   // e.g. "http://127.0.0.1:20003" or "https://..."
@@ -42,7 +42,7 @@ struct ProxyTarget {
     // Phase 8 (mTLS): populated only for an https:// base_url that needs
     // mutual TLS to a domain server requiring client certs -- "verify the
     // gateway's certificate, not trust a forwarded external bearer token"
-    // (CLAUDE.md). tls_ca_cert verifies the *domain's* server certificate
+    // (docs/DESIGN.md). tls_ca_cert verifies the *domain's* server certificate
     // against this project's own demo CA (self-signed, not a public one),
     // so the mutual auth runs both directions. All empty (the default) for
     // a plain http:// target -- nothing new to configure for the existing
@@ -89,13 +89,13 @@ public:
 
     // Phase 3: operational telemetry (per-request latency) is a *separate*
     // sink from set_event_sink's security-relevant events — "an IDS should
-    // not be your APM" (CLAUDE.md). Same stdout-by-default seam either way.
+    // not be your APM" (docs/DESIGN.md). Same stdout-by-default seam either way.
     void set_telemetry_sink(EventSink sink);
 
     // Associates a DID catalog with an entity path, enabling named data
     // paths (/data/battery_voltage) and typed /docs output for it. Catalogs
     // are per-ECU-software-version, kept separate from topology (see
-    // CLAUDE.md) — an entity with no attached catalog still works, just
+    // docs/DESIGN.md) — an entity with no attached catalog still works, just
     // falls back to raw hex DIDs and an empty /docs data/operations list.
     void attach_catalog(const std::string &entity_path, catalog::Catalog cat);
 
@@ -185,7 +185,7 @@ private:
     // and returns it so the handler can attach it to any emitted event.
     // Clocks may not be synced across a gateway/domain-HPC hop — this is
     // what lets an event get correlated to the request that caused it
-    // instead, which timestamps alone can't guarantee (CLAUDE.md).
+    // instead, which timestamps alone can't guarantee (docs/DESIGN.md).
     std::string correlation_id_for(const httplib::Request &req, httplib::Response &res) const;
 
     // B2: if req's Origin header is in the allow-list, stamps

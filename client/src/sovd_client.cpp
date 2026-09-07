@@ -62,7 +62,7 @@ json SovdClient::request(const std::string &method, const std::string &url_path,
         }
 
         // Retry only 503/504, never 423 -- retrying a lock conflict just
-        // hammers whoever actually holds it (CLAUDE.md).
+        // hammers whoever actually holds it (docs/DESIGN.md).
         if ((res->status == 503 || res->status == 504) && attempt < retry_.max_retries) {
             std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
             backoff_ms *= 2;

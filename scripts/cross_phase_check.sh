@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Task 9 (SOVD_REVIEW_FEEDBACK.md; CLAUDE.md's Working conventions): runs
+# Task 9 (docs/reviews/round-1.md; docs/DESIGN.md's Working conventions): runs
 # the cross-feature combinations the review's closing note named, not just
 # each feature in isolation. Task 1 (OAuth2 breaking the whole web UI) was
 # exactly this failure mode -- Phase 7 and Phase 8's OAuth2 were each

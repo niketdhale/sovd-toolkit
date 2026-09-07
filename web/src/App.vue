@@ -10,7 +10,7 @@ import LiveChart from './views/LiveChart.vue'
 // gateway -- streaming through a Phase 4 proxy is a deliberate 501, so
 // screen 4 can't run against the gateway tier.
 const baseUrlInput = ref(import.meta.env.VITE_SOVD_BASE_URL ?? 'http://localhost:20003')
-// SOVD_REVIEW_FEEDBACK.md Task 1b: optional -- an unauthenticated server
+// docs/reviews/round-1.md Task 1b: optional -- an unauthenticated server
 // (this project's default demo config) never checks this at all, matching
 // SovdClient.token's own "unset means no Authorization header" behavior.
 const tokenInput = ref('')
@@ -49,7 +49,7 @@ async function connect() {
     entities.value = list
     client.value = c
   } catch (e) {
-    // SOVD_REVIEW_FEEDBACK.md Task 1b: 401 ("no/invalid token") and 403
+    // docs/reviews/round-1.md Task 1b: 401 ("no/invalid token") and 403
     // ("valid token, wrong scope") are different user problems -- the
     // server already distinguishes them (routes.cpp's check_oauth2), so
     // this labels which one happened instead of showing a flat error.

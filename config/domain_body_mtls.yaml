@@ -1,6 +1,6 @@
 # Phase 8 (mTLS) variant of config/domain_body.yaml: same topology, but
 # this domain server requires and verifies a client certificate on every
-# connection (server.tls.client_ca set) -- CLAUDE.md: "internal hop must
+# connection (server.tls.client_ca set) -- docs/DESIGN.md: "internal hop must
 # verify the gateway's certificate, not trust a forwarded external bearer
 # token". Run `scripts/generate_demo_certs.sh` first to produce certs/.
 server:

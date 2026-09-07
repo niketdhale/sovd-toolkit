@@ -107,7 +107,7 @@ bool verify_token(const std::string &token, const std::string &secret, TokenClai
         base64url_encode(reinterpret_cast<const unsigned char *>(expected_sig.data()), expected_sig.size());
     if (!constant_time_equal(sig_b64, expected_sig_b64)) return false;
 
-    // SOVD_REVIEW_FEEDBACK.md Task 6: not currently exploitable -- this
+    // docs/reviews/round-1.md Task 6: not currently exploitable -- this
     // verifier always recomputes HS256 unconditionally and never branches
     // on the header, so alg:none / RS256-vs-HS256 confusion (both of which
     // require the verifier to *switch* on alg) don't apply today. Checked

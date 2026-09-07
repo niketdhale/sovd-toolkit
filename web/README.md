@@ -1,6 +1,6 @@
 # SOVD Toolkit — Web UI (Phase 7)
 
-Vue 3 + Vite + Tailwind, hosted separately from the vehicle (CLAUDE.md's
+Vue 3 + Vite + Tailwind, hosted separately from the vehicle (docs/DESIGN.md's
 design constraint). **Zero knowledge of any specific ECU is baked into this
 code** — every entity, data id, type, and value in the four screens below
 comes from `GET /entities` and `GET /entities/{path}/docs` at runtime.
@@ -33,7 +33,7 @@ Pointing this at a different server? Its `cors_allowed_origins` (or
 dev server's actual origin, or the browser will block every request —
 that's the browser's same-origin policy doing its job, not a bug here.
 
-## The four screens, then stop (CLAUDE.md's own scope line)
+## The four screens, then stop (docs/DESIGN.md's own scope line)
 
 1. **Entities** — flat list from `/entities`.
 2. **Faults** — read + status filter + clear (one-shot lock, no heartbeat —

@@ -1,16 +1,16 @@
 apiVersion: 1
 
 # Grafana unified alerting provisioning (Grafana OSS, no plugin needed --
-# native to the stack CLAUDE.md already targets). Drop this file into
+# native to the stack docs/DESIGN.md already targets). Drop this file into
 # /etc/grafana/provisioning/alerting/ on the Grafana instance that already
 # reads from InfluxDB. Replace <INFLUXDB_DATASOURCE_UID> with the uid of the
 # existing datasource (Settings -> Data sources -> InfluxDB -> uid in the URL).
 #
-# The two signatures are exactly the two named in CLAUDE.md Phase 3:
+# The two signatures are exactly the two named in docs/DESIGN.md Phase 3:
 #   - lock_release_mismatch: a client released with the wrong lock_id --
 #     either a bug or a client probing for another tester's lock.
 #   - repeated lock_denied on one entity: a client hammering a lock it
-#     can't get, instead of backing off (CLAUDE.md client config already
+#     can't get, instead of backing off (docs/DESIGN.md client config already
 #     excludes 423 from the SDK's own retry policy for this reason).
 groups:
   - orgId: 1

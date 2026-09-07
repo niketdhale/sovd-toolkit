@@ -2,7 +2,7 @@
 // hardcoded build_topology(). Lives alongside main.cpp (compiled into the
 // sovd_server executable target, not sovd_server_lib): it directly
 // instantiates concrete adapters (mock, uds_doip), which is exactly the
-// "backend complexity" CLAUDE.md's layering rule keeps out of server/'s own
+// "backend complexity" docs/DESIGN.md's layering rule keeps out of server/'s own
 // library — main.cpp already did this for the hardcoded demo, this is the
 // same responsibility, just data-driven.
 #pragma once
@@ -29,7 +29,7 @@ struct ServerConfig {
     // httplib::SSLServer instead of a plain Server. tls_client_ca present
     // on top of that => the server requires and verifies a client
     // certificate on every connection (mutual TLS) -- the gateway<->domain
-    // hop CLAUDE.md's mTLS item is about, not the external tester-facing
+    // hop docs/DESIGN.md's mTLS item is about, not the external tester-facing
     // boundary (that's OAuth2's job). All empty (the default) means plain
     // HTTP, unchanged from every config that predates this.
     std::string tls_cert;

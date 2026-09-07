@@ -2,7 +2,7 @@
 import { ref, watch, onUnmounted, computed } from 'vue'
 import type { SovdClient, DocsResult } from '../api/sovdClient'
 
-// Screen 4 -- the clearest "why SOVD over UDS" demo (CLAUDE.md). Native
+// Screen 4 -- the clearest "why SOVD over UDS" demo (docs/DESIGN.md). Native
 // EventSource, not a hand-rolled SSE client: it's the browser's own API for
 // this, and B2 already verified CORS on the stream endpoint specifically
 // for it. No charting dependency for one screen -- a hand-rolled SVG

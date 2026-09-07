@@ -51,7 +51,7 @@ target_link_libraries(sovd_core PUBLIC Threads::Threads)
 
 # --- catalog: DID/operation YAML definitions, shared by server and adapters ---
 # yaml-cpp is fetched rather than vendored as a single header: the catalog
-# schema (CLAUDE.md) uses flow-style YAML ({ bytes: 2, ... }), which rules
+# schema (docs/DESIGN.md) uses flow-style YAML ({ bytes: 2, ... }), which rules
 # out header-only minimal parsers (mini-yaml, tried first, has no flow-style
 # support at all). yaml-cpp is the standard, well-tested choice that handles
 # the full spec.
@@ -113,7 +113,7 @@ target_link_libraries(sovd_server_lib PUBLIC sovd_core sovd_catalog Threads::Thr
 # concrete adapters directly (same responsibility main.cpp's hardcoded
 # build_topology() already had), so it's a separate target from
 # sovd_server_lib rather than baked into it — sovd_server_lib stays
-# adapter-agnostic per CLAUDE.md's layering rule, and this is shared by both
+# adapter-agnostic per docs/DESIGN.md's layering rule, and this is shared by both
 # sovd_server and test_core instead of duplicating the source in each.
 add_library(sovd_config_loader STATIC server/src/config_loader.cpp)
 target_include_directories(sovd_config_loader PRIVATE adapters/mock)

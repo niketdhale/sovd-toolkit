@@ -7,7 +7,7 @@
 // coaxed into: no response, malformed/truncated frames, NRC storms, and
 // 0x78 response-pending storms.
 //
-// Per CLAUDE.md: "Build a fault-injecting DoIP simulator BEFORE the session
+// Per docs/DESIGN.md: "Build a fault-injecting DoIP simulator BEFORE the session
 // manager. Otherwise you debug against a simulator that never reproduces
 // the failure." This exists so that constraint is satisfiable without
 // access to the external DoIP_ECU_Simulator asset.

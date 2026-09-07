@@ -1,7 +1,7 @@
 // Phase 5 CLI. Deliberately zero hardcoded entity/DID knowledge anywhere in
 // this file -- every path/id is a runtime argument, and `docs` is how a
 // user (or a script) discovers what's actually callable on a given entity.
-// That's what "discovery-driven, not hardcoded" (CLAUDE.md) means for a CLI
+// That's what "discovery-driven, not hardcoded" (docs/DESIGN.md) means for a CLI
 // specifically: the same constraint Phase 7's web UI restates for a GUI.
 #include <atomic>
 #include <csignal>
@@ -201,7 +201,7 @@ int main(int argc, char **argv) {
             std::cout.flush();
             // Phase 6: pushed by the server's shared poller, not polled by
             // this loop -- "backed by adapter-level periodic read, not
-            // per-request polling" (CLAUDE.md) applies to the client side
+            // per-request polling" (docs/DESIGN.md) applies to the client side
             // too: this is one long-lived subscription, not a GET per tick.
             std::string last;
             cli.subscribe_data(argv[3], argv[4], interval_ms,

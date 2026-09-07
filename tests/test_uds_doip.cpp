@@ -36,7 +36,7 @@ using sovd::uds_doip::test::FaultMode;
 // Its heartbeat/idle-timeout behavior is genuinely wall-clock-driven (a
 // real background thread, not a lazily-checked TTL like LockManager), so
 // unlike the rest of this project's tests, these use short real intervals
-// with bounded polling rather than an injectable clock — see CLAUDE.md for
+// with bounded polling rather than an injectable clock — see docs/DESIGN.md for
 // why that tradeoff was made here specifically.
 // ---------------------------------------------------------------------
 
@@ -385,7 +385,7 @@ void test_transport_routing_activation_denied() {
 
 void test_transport_read_data_by_identifier_roundtrip() {
     FakeDoipServer server;
-    // 22 01 0A -> 62 01 0A 32 C8 (matches the CLAUDE.md worked example bytes)
+    // 22 01 0A -> 62 01 0A 32 C8 (matches the docs/DESIGN.md worked example bytes)
     server.set_response({0x22, 0x01, 0x0A}, {0x62, 0x01, 0x0A, 0x32, 0xC8});
 
     DoipTransport transport(fast_config(server.port()));
@@ -490,7 +490,7 @@ void test_transport_response_pending_then_receive_pending_response() {
     ASSERT_EQ(response[0], 0x62);
 }
 
-void test_nrc_map_matches_claude_md_table() {
+void test_nrc_map_matches_design_md_table() {
     ASSERT_TRUE(nrc_to_sovd_result(0x33) == SOVD_FORBIDDEN);   // securityAccessDenied -> 403
     ASSERT_TRUE(nrc_to_sovd_result(0x31) == SOVD_BAD_REQUEST); // requestOutOfRange -> 400
     ASSERT_TRUE(nrc_to_sovd_result(0x22) == SOVD_CONFLICT);    // conditionsNotCorrect -> 409
@@ -779,7 +779,7 @@ void test_end_to_end_http_through_real_adapter() {
     using json = nlohmann::json;
 
     FakeDoipServer server;
-    // battery_voltage: matches CLAUDE.md's worked example exactly.
+    // battery_voltage: matches docs/DESIGN.md's worked example exactly.
     server.set_response({0x22, 0x01, 0x0A}, {0x62, 0x01, 0x0A, 0x32, 0xC8});
     // door_lock_state is io_control:true in catalogs/bcm.yaml -> 0x2F.
     server.set_response({0x2F, 0x02, 0x00, uds::kIoControlShortTermAdjustment, 0x02},
@@ -877,7 +877,7 @@ int main() {
     RUN_TEST(test_session_manager_ensure_security_level_wrong_key_fails);
     RUN_TEST(test_session_manager_revert_to_default_clears_security_level);
 
-    RUN_TEST(test_nrc_map_matches_claude_md_table);
+    RUN_TEST(test_nrc_map_matches_design_md_table);
     RUN_TEST(test_nrc_map_exhaustive);
 
     RUN_TEST(test_uds_read_data_by_identifier_roundtrip);

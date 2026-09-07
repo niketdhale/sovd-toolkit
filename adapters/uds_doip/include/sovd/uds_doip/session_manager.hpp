@@ -5,7 +5,7 @@
 // its own logical_address), so this deliberately does not track multiple
 // ECUs — no map, just one piece of session state.
 //
-// See CLAUDE.md's "Session manager ownership" for the full reasoning this
+// See docs/DESIGN.md's "Session manager ownership" for the full reasoning this
 // implements: escalation only ever happens from a lock-gated call
 // (ensure_session), teardown is driven by set_mode("default") calling
 // revert_to_default(), and a silently expired SOVD lock (no explicit
@@ -66,7 +66,7 @@ public:
     // is the requestSeed sub-function per ISO 14229-1's convention; the
     // matching sendKey sub-function (level+1) is derived internally, not a
     // separate parameter. Real key derivation is OEM-proprietary and
-    // secret (CLAUDE.md); this calls uds_services.hpp's clearly-labeled
+    // secret (docs/DESIGN.md); this calls uds_services.hpp's clearly-labeled
     // derive_key_DEMO_ONLY_NOT_SECURE stand-in -- never use this outside
     // this project's own tests/demo. Reuses send_, the same serialized
     // transport-access path ensure_session already uses, so this and the

@@ -1,5 +1,5 @@
 # Drop into telegraf.d/ on the box already running the MQTT -> Telegraf ->
-# InfluxDB -> Grafana pipeline (CLAUDE.md's IDSM stack). Two separate inputs,
+# InfluxDB -> Grafana pipeline (docs/DESIGN.md's IDSM stack). Two separate inputs,
 # matching the SOVD server's own topic split -- security events never land
 # in the same measurement as request-latency telemetry ("an IDS should not
 # be your APM").

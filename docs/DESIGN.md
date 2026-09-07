@@ -1,6 +1,7 @@
-# CLAUDE.md — sovd-toolkit
+# DESIGN.md — sovd-toolkit
 
-Context file for Claude Code. Read this first before touching the repo.
+Architecture, decision log, and phase-by-phase build history. Read this
+before making any non-trivial change to the repo.
 
 ---
 
@@ -48,7 +49,7 @@ server cert verified against a private demo CA), and SecurityAccess
 gating what the ECU demands, `execute:security_access` OAuth2 scope gating
 who may ask).
 
-**External review response — COMPLETE, 2026-08-22.** `SOVD_REVIEW_FEEDBACK.md`
+**External review response — COMPLETE, 2026-08-22.** `docs/reviews/round-1.md`
 (checked into the repo root) is an outside review of commit `4f7f8ed` that
 built and ran every configuration rather than reading the code — it found
 one real integration gap: **Phase 7 (browser-verified 2026-08-20) and
@@ -122,7 +123,7 @@ just unit-tested:
   reading a lock-acquire response body it might not be reading. **Settled
   as D5** below — chose "advertise the ceiling" over "reject an over-
   ceiling request with 400" to preserve the existing clamp-and-tell-the-
-  truth design (CLAUDE.md's original resource-limits reasoning), fixing
+  truth design (docs/DESIGN.md's original resource-limits reasoning), fixing
   only the "tell" half for a client that never reads response bodies.
 - **Task 9 [PROCESS]**: `scripts/cross_phase_check.sh` boots the relevant
   server combinations and curls the cross-feature matrix the review's own
@@ -131,7 +132,7 @@ just unit-tested:
   **Working conventions** below as a standing rule: a feature that works
   alone and fails in combination is not complete.
 
-**Round 2 — COMPLETE, 2026-08-22.** `SOVD_REVIEW_ROUND2.md` (also checked
+**Round 2 — COMPLETE, 2026-08-22.** `docs/reviews/round-2.md` (also checked
 in) rebuilt every config and independently re-ran all nine Round 1
 acceptance criteria rather than trusting the commit message — all nine
 verified, including the exact Task 1c sequence (mint → stream → replay
@@ -195,8 +196,8 @@ not always returning freed heap to the OS, not a sign the sweep didn't run
 | **D1** | UI points at gateway or domain server? | **Domain server directly.** All four screens work; the two-tier topology stays a curl/CLI demo (Phase 4), not part of the UI. |
 | **D2** | SecurityAccess gating needs **both** a catalog field and an OAuth2 scope | **Recorded, implemented in Phase 8** alongside the scope work — nothing to build for Phase 7. |
 | **D3** | Browser lock lifecycle | **Short TTL (10s) + JS heartbeat + best-effort `beforeunload` release.** Not the CLI's 60s default — different failure mode (a closed tab has no RAII destructor). |
-| **D4** | SSE stream auth once OAuth2 is on — `EventSource` can't set a bearer header | **Short-lived (30s) single-use ticket**, minted by a normal bearer-authenticated `POST .../stream-ticket`, carried in the stream URL's query string. Chosen over `?access_token=...` (a real token in a URL, browser history, and any reverse-proxy log) or switching to `fetch()`+`ReadableStream` (loses `EventSource`'s automatic reconnect). Settled 2026-08-22, `SOVD_REVIEW_FEEDBACK.md` Task 1c. |
-| **D5** | Lock TTL ceiling: silently clamp, reject, or advertise? | **Clamp (unchanged) + advertise.** `GET /` now carries `limits.lock_ttl_ceiling_seconds` so a well-behaved client can self-limit; an over-ceiling request still gets `201`/`204` with the true granted TTL in the body, not a `400`. Rejecting would contradict the original "clamping is friendlier than rejecting" call; this only fixes discovery for a client not reading response bodies. Settled 2026-08-22, `SOVD_REVIEW_FEEDBACK.md` Task 8. |
+| **D4** | SSE stream auth once OAuth2 is on — `EventSource` can't set a bearer header | **Short-lived (30s) single-use ticket**, minted by a normal bearer-authenticated `POST .../stream-ticket`, carried in the stream URL's query string. Chosen over `?access_token=...` (a real token in a URL, browser history, and any reverse-proxy log) or switching to `fetch()`+`ReadableStream` (loses `EventSource`'s automatic reconnect). Settled 2026-08-22, `docs/reviews/round-1.md` Task 1c. |
+| **D5** | Lock TTL ceiling: silently clamp, reject, or advertise? | **Clamp (unchanged) + advertise.** `GET /` now carries `limits.lock_ttl_ceiling_seconds` so a well-behaved client can self-limit; an over-ceiling request still gets `201`/`204` with the true granted TTL in the body, not a `400`. Rejecting would contradict the original "clamping is friendlier than rejecting" call; this only fixes discovery for a client not reading response bodies. Settled 2026-08-22, `docs/reviews/round-1.md` Task 8. |
 
 Full reasoning for each: **OPEN DECISIONS** section below.
 
@@ -223,15 +224,16 @@ implements the in-vehicle server side (gateway / domain HPC) plus a client SDK.
 scale one person can finish. A partial implementation of the full spec is worth
 less than a complete implementation of a coherent subset.
 
-### Owner context
-Automotive cybersecurity engineer (AUTOSAR SecOC, IDS/IDSM pipelines,
-ISO/SAE 21434, WP.29/UN-R155 CSMS, ECU pentesting, DoIP/SOME/IP fuzzing).
-This is a portfolio + interview project, so *architectural seriousness matters
-more than feature count*. Existing assets to reuse:
+### Project background
+Built from an automotive cybersecurity engineering background (AUTOSAR SecOC,
+IDS/IDSM pipelines, ISO/SAE 21434, WP.29/UN-R155 CSMS, ECU pentesting,
+DoIP/SOME/IP fuzzing). It's a portfolio + interview project, so *architectural
+seriousness matters more than feature count*. Prior assets that informed the
+design:
 - `DoIP_ECU_Simulator` — target for the Phase 2 UDS/DoIP adapter
 - `autosar-idsm-toolkit` — the IDS pipeline this feeds in Phase 3
-- IDSM pipeline already built: MQTT → Telegraf → InfluxDB → Grafana OSS
-- Vue 3 + Vite + Tailwind experience (from the Verso project) → reuse in Phase 7
+- An existing IDSM pipeline: MQTT → Telegraf → InfluxDB → Grafana OSS
+- Vue 3 + Vite + Tailwind experience (from a prior project, Verso) — reused in Phase 7
 
 ---
 
@@ -303,7 +305,7 @@ External tester  ──SOVD/HTTP──►  Gateway / Domain HPC
 These were **not** for an implementing agent to pick silently — each had a
 real consequence and a wrong default. D1–D3 were put to the project owner
 explicitly (not defaulted) and confirmed before any Phase 7 code. D4–D5
-came out of `SOVD_REVIEW_FEEDBACK.md`'s external review and were resolved
+came out of `docs/reviews/round-1.md`'s external review and were resolved
 by picking the option the review itself recommended, with reasoning
 recorded here in the same style — not agent-picked-and-unrecorded either.
 
@@ -356,7 +358,7 @@ single-digit seconds):
   short rather than being relied on).
 
 ### D4. SSE stream auth once OAuth2 is on → **short-lived single-use ticket**
-`SOVD_REVIEW_FEEDBACK.md` Task 1c, settled 2026-08-22. A browser
+`docs/reviews/round-1.md` Task 1c, settled 2026-08-22. A browser
 `EventSource` cannot set an `Authorization` header — this is a hard browser
 API limitation, not a design gap in this project. Once `SOVD_OAUTH2_SECRET`
 is set, the SSE stream route (screen 4's whole reason to exist) can't be
@@ -402,7 +404,7 @@ project actually ships: the web UI's `fetch()` and `httplib::Client::Post`
 was fixed the same way — a reminder for whoever next hand-curls this route.
 
 ### D5. Lock TTL ceiling: clamp silently, reject, or advertise? → **clamp + advertise**
-`SOVD_REVIEW_FEEDBACK.md` Task 8, settled 2026-08-22. `POST/PUT .../locks`
+`docs/reviews/round-1.md` Task 8, settled 2026-08-22. `POST/PUT .../locks`
 already echoes the actually-*granted* TTL when a request exceeds
 `kMaxLockTtlSeconds` (Phase 8's original resource-limits work) — correct
 and unchanged — but a caller that never reads the response body has no way
@@ -461,7 +463,7 @@ never escalate in the first place.
 sovd-toolkit/
 ├── CMakeLists.txt          # static adapters via configure-time options
 ├── README.md
-├── CLAUDE.md               # this file
+├── docs/DESIGN.md               # this file
 ├── core/                   # pure logic: NO HTTP, NO sockets, NO JSON
 │   ├── include/sovd/
 │   │   ├── adapter.h           # ★ THE SEAM — C-ABI vtable
@@ -601,7 +603,7 @@ build B3's "capability reduction by linkage" argument actually rests on:
 cmake -S . -B build -DSOVD_ADAPTER_MOCK=OFF -DSOVD_ADAPTER_UDS_DOIP=OFF
 cmake --build build -j4
 ```
-Added 2026-08-22 (`SOVD_REVIEW_FEEDBACK.md` Task 5) after the review found
+Added 2026-08-22 (`docs/reviews/round-1.md` Task 5) after the review found
 this exact configuration — the only one of the four this file claimed
 clean without ever actually building — threw `-Wunused-function` on
 `attach_router_catalog_if_present()` in `config_loader.cpp`. Fixed (wrapped
@@ -617,7 +619,7 @@ Builds clean under `-Wall -Wextra -Wpedantic` with zero warnings in all
 
 Everything below is opt-in via an environment variable, with **no YAML
 config key at all** — checked precisely, not assumed, after
-`SOVD_REVIEW_FEEDBACK.md` Task 3 pointed out this file didn't previously
+`docs/reviews/round-1.md` Task 3 pointed out this file didn't previously
 say so anywhere a reader of only the config schema would see it:
 
 | Env var | What | YAML equivalent |
@@ -1074,7 +1076,7 @@ Events already emitted, each carrying `correlation_id` (Phase 1), via
       mechanism now would be guarding a leak that doesn't exist yet. This
       matters once descriptive NRC text (from `adapters/uds_doip/nrc_map`)
       gets threaded up into HTTP error messages for technician-facing
-      builds; CLAUDE.md's original framing ("add before the response schema
+      builds; docs/DESIGN.md's original framing ("add before the response schema
       is fixed") still holds — revisit at that point, not before.
 
 ---
@@ -1130,7 +1132,7 @@ and every other entity keep working.
       preserved in spirit (one table lookup selects the dispatch path) even
       though it's not literally the same C-ABI struct. A config-loader
       consequence: `kind: sovd_proxy` is attached **per leaf entity**, not
-      per-area as CLAUDE.md's original schema sketch showed (each leaf gets
+      per-area as docs/DESIGN.md's original schema sketch showed (each leaf gets
       its own `base_url`/`remote_path`) — the per-entity vtable/dispatch
       model was never going to support "one adapter covers an entire
       subtree," sketch or no sketch.
@@ -1222,7 +1224,7 @@ live testing, not by inspection — see the RAII and CLI bullets.
       actually failing on the first run, not by code review.
 - [x] Retry/backoff on `503`/`504`, **never** `423` — `SovdClient::request()`
       in `sovd_client.cpp`; defaults (`max_retries=3`, `backoff_ms=200`,
-      doubling) match the `retry:` block CLAUDE.md's client config schema
+      doubling) match the `retry:` block docs/DESIGN.md's client config schema
       already documented in Phase 1.
 - [x] **mDNS discovery (`_sovd._tcp.local`)** — real `avahi-client`, not
       hand-rolled DNS-SD packet parsing (unlike DoIP/MQTT's "hand-roll the
@@ -1613,7 +1615,7 @@ else streamed).
       `SOVD_OAUTH2_SECRET` (same shape as `SOVD_MQTT_HOST`/`SOVD_CORS_
       ORIGINS`/`SOVD_AUDIT_LOG_PATH`) — unset means no auth check at all.
       **Scope-to-route mapping** (`routes.cpp`'s `oauth2_scope_table()`)
-      uses exactly the three scopes CLAUDE.md's own Phase 1 client-config
+      uses exactly the three scopes docs/DESIGN.md's own Phase 1 client-config
       sketch already named (`read:faults`, `read:data`, `execute:routines`)
       rather than inventing finer-grained ones: reads of faults/data need
       the matching `read:*` scope; every mutating or privileged route (PUT
@@ -1949,7 +1951,7 @@ else streamed).
   individual features. Before marking a phase (or a follow-up) complete,
   run the cross-phase matrix — `scripts/cross_phase_check.sh` — not just
   each feature in isolation.** Added 2026-08-22 after
-  `SOVD_REVIEW_FEEDBACK.md`'s external review found exactly this failure
+  `docs/reviews/round-1.md`'s external review found exactly this failure
   mode: Phase 7 (browser-verified 2026-08-20) and Phase 8's OAuth2 (landed
   the same day, after) were each verified honestly on their own, and the
   combination — enabling `SOVD_OAUTH2_SECRET` — 401'd the entire web UI. A

@@ -169,8 +169,15 @@ start_server /tmp/cross_phase_domain_mtls.log "$BIN" config/domain_body_mtls.yam
 sleep 0.5 # HTTPS-only listener; wait_for_port's plain-HTTP probe doesn't apply
 start_server /tmp/cross_phase_gateway_mtls.log "$BIN" config/gateway_mtls.yaml
 wait_for_port 20012 || fail "gateway_mtls.yaml server never came up"
-[ "$(status_of http://127.0.0.1:20012/v1/entities/vehicle/body/bcm/data/battery_voltage)" = "200" ] &&
-    pass "typed read through an mTLS-proxied gateway" || fail "mTLS proxy read broken"
+if [ "$(status_of http://127.0.0.1:20012/v1/entities/vehicle/body/bcm/data/battery_voltage)" = "200" ]; then
+    pass "typed read through an mTLS-proxied gateway"
+else
+    fail "mTLS proxy read broken"
+    echo "  --- domain_body_mtls.yaml stderr/stdout ---"
+    tail -n 40 /tmp/cross_phase_domain_mtls.log
+    echo "  --- gateway_mtls.yaml stderr/stdout ---"
+    tail -n 40 /tmp/cross_phase_gateway_mtls.log
+fi
 stop_all
 
 echo

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Icon from '../components/Icon.vue'
 import { ref, watch } from 'vue'
 import type { SovdClient, FaultInfo } from '../api/sovdClient'
 
@@ -20,6 +21,7 @@ async function load() {
   if (!props.path) return
   loading.value = true
   error.value = null
+  faults.value = []
   try {
     faults.value = await props.client.getFaults(props.path, statusFilter.value)
   } catch (e) {
@@ -57,7 +59,7 @@ watch(() => [props.path, statusFilter.value], load, { immediate: true })
 
 <template>
   <div v-if="!path" class="card flex flex-col items-center px-6 py-16 text-center">
-    <span class="flex size-10 items-center justify-center rounded-full bg-gray-100 text-lg dark:bg-white/10">⚠</span>
+    <span class="flex size-10 items-center justify-center rounded-full bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-400"><Icon name="warning" class="size-5" /></span>
     <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">Select an entity from the Entities tab first.</p>
   </div>
   <div v-else>
@@ -79,9 +81,12 @@ watch(() => [props.path, statusFilter.value], load, { immediate: true })
       </div>
     </div>
 
-    <p v-if="error" class="mb-3 text-sm text-red-600 dark:text-red-400">{{ error }}</p>
+    <div v-if="error" role="alert" class="alert-error">
+      <span>{{ error }}</span>
+      <button type="button" class="btn btn-secondary shrink-0" @click="load"><Icon name="retry" class="size-4" />Retry</button>
+    </div>
 
-    <div class="card overflow-hidden">
+    <div class="card overflow-x-auto">
       <table class="min-w-full divide-y divide-gray-200 dark:divide-white/10">
         <thead class="bg-gray-50 dark:bg-white/5">
           <tr>
@@ -90,14 +95,19 @@ watch(() => [props.path, statusFilter.value], load, { immediate: true })
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-200 dark:divide-white/10">
+          <tr v-for="n in loading && faults.length === 0 ? 3 : 0" :key="'s' + n">
+            <td class="py-4 pl-4 pr-3 sm:pl-6"><div class="skeleton h-4 w-24"></div></td>
+            <td class="px-3 py-4"><div class="skeleton h-5 w-16"></div></td>
+          </tr>
           <tr v-for="f in faults" :key="f.code" class="hover:bg-gray-50 dark:hover:bg-white/5">
             <td class="py-4 pl-4 pr-3 font-mono text-sm text-gray-900 sm:pl-6 dark:text-gray-100">{{ f.code }}</td>
             <td class="px-3 py-4 text-sm"><span :class="badgeFor(f.status)">{{ f.status }}</span></td>
           </tr>
         </tbody>
       </table>
-      <div v-if="!loading && faults.length === 0" class="px-6 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
-        No faults{{ statusFilter ? ` with status "${statusFilter}"` : '' }}.
+      <div v-if="!loading && !error && faults.length === 0" class="px-6 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
+        <Icon name="check" class="mx-auto size-8 text-green-600 dark:text-green-400" />
+        <p class="mt-2">All clear — no faults{{ statusFilter ? ` with status "${statusFilter}"` : '' }}.</p>
       </div>
     </div>
   </div>

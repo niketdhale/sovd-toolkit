@@ -13,7 +13,8 @@ const props = defineProps<{ client: SovdClient; path: string | null }>()
 const docs = ref<DocsResult | null>(null)
 const selectedId = ref('')
 const intervalMs = ref(1000)
-const points = ref<number[]>([])
+const samples = ref<{ t: number; v: number }[]>([])
+const windowSec = ref(60)
 const logLines = ref<string[]>([])
 const error = ref<string | null>(null)
 const streaming = ref(false)
@@ -59,7 +60,7 @@ async function loadDocs() {
 }
 
 async function startStream() {
-  points.value = []
+  samples.value = []
   logLines.value = []
   await openStream()
 }
@@ -95,8 +96,11 @@ async function openStream() {
       if (data.error) {
         logLines.value.unshift(`error: ${data.error} — ${data.message ?? ''}`)
       } else if (selectedItem.value?.type === 'float') {
-        points.value.push(Number(data.value))
-        if (points.value.length > 50) points.value.shift()
+        const now = Date.now()
+        samples.value.push({ t: now, v: Number(data.value) })
+        // keep at most the largest window (5m) in memory
+        const keep = now - 300_000
+        while (samples.value.length && samples.value[0].t < keep) samples.value.shift()
       } else {
         logLines.value.unshift(`${new Date().toLocaleTimeString()}  ${JSON.stringify(data.value)}`)
         if (logLines.value.length > 50) logLines.value.pop()
@@ -117,6 +121,17 @@ async function openStream() {
   }
 }
 
+const points = computed(() => {
+  const from = Date.now() - windowSec.value * 1000
+  // samples is reactive, so this recomputes on every new frame
+  return samples.value.filter((s) => s.t >= from).map((s) => s.v)
+})
+const stats = computed(() =>
+  points.value.length ? { min: Math.min(...points.value), max: Math.max(...points.value), latest: points.value[points.value.length - 1] } : null,
+)
+
+const fmt = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(n))
+
 const svgPoints = computed(() => {
   if (points.value.length < 2) return ''
   const min = Math.min(...points.value)
@@ -135,6 +150,7 @@ const svgPoints = computed(() => {
 
 watch(() => props.path, loadDocs, { immediate: true })
 onUnmounted(closeStream)
+defineExpose({ refresh: () => loadDocs() })
 </script>
 
 <template>
@@ -159,6 +175,14 @@ onUnmounted(closeStream)
           interval
           <input v-model.number="intervalMs" type="number" min="100" step="100" class="field w-20" />
           ms
+        </label>
+        <label class="flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400">
+          window
+          <select v-model.number="windowSec" class="field" aria-label="Time window">
+            <option :value="30">30s</option>
+            <option :value="60">1m</option>
+            <option :value="300">5m</option>
+          </select>
         </label>
         <span
           class="badge"
@@ -189,8 +213,10 @@ onUnmounted(closeStream)
           <polyline :points="svgPoints" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" />
         </svg>
         <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          last {{ points.length }} value(s)<template v-if="points.length">, most recent
-          <span class="font-semibold text-gray-900 dark:text-gray-100">{{ points[points.length - 1] }} {{ selectedItem?.unit ?? '' }}</span></template>
+          last {{ points.length }} value(s)<template v-if="stats">
+            · min <span class="font-semibold text-gray-900 dark:text-gray-100">{{ fmt(stats.min) }}</span>
+            · max <span class="font-semibold text-gray-900 dark:text-gray-100">{{ fmt(stats.max) }}</span>
+            · latest <span class="font-semibold text-gray-900 dark:text-gray-100">{{ fmt(stats.latest) }} {{ selectedItem?.unit ?? '' }}</span></template>
         </p>
       </div>
 

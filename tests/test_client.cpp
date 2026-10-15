@@ -1,6 +1,7 @@
 // Phase 5: SovdClient/LockGuard tested against a real live sovd_server
 // (same "test the real path, not a mock of the SDK's own dependency"
 // standard as the rest of this repo) rather than mocking httplib::Client.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -271,6 +272,90 @@ void test_client_subscribe_data_throws_on_immediate_failure() {
     ASSERT_TRUE(threw);
 }
 
+// Minimal in-process server that answers GET /v1/entities with a scripted
+// status sequence (last entry repeats) and counts the hits, so retry
+// behaviour is observable without depending on server-side fault injection.
+struct ScriptedServer {
+    httplib::Server svr;
+    std::thread thread;
+    std::atomic<int> hits{0};
+    int port = 0;
+
+    explicit ScriptedServer(std::vector<int> statuses) {
+        svr.Get("/v1/entities", [this, statuses](const httplib::Request &, httplib::Response &res) {
+            size_t i = static_cast<size_t>(hits++);
+            int status = statuses[std::min(i, statuses.size() - 1)];
+            res.status = status;
+            if (status == 200) {
+                res.set_content(R"({"items":[]})", "application/json");
+            } else {
+                res.set_content(R"({"error":"SCRIPTED","message":"scripted failure"})", "application/json");
+            }
+        });
+        port = svr.bind_to_any_port("127.0.0.1");
+        thread = std::thread([this] { svr.listen_after_bind(); });
+        svr.wait_until_ready();
+    }
+    ~ScriptedServer() {
+        svr.stop();
+        thread.join();
+    }
+    std::string base_url() const { return "http://127.0.0.1:" + std::to_string(port); }
+};
+
+// Returns the SovdError status thrown by list_entities(), or -1 if it succeeded.
+int list_entities_status(SovdClient &cli) {
+    try {
+        cli.list_entities();
+    } catch (const SovdError &ex) {
+        return ex.status;
+    }
+    return -1;
+}
+
+void test_client_401_and_403_are_not_retried() {
+    for (int status : {401, 403}) {
+        ScriptedServer server({status});
+        SovdClient cli(server.base_url(), RetryPolicy{3, 1});
+        ASSERT_EQ(list_entities_status(cli), status);
+        ASSERT_EQ(server.hits.load(), 1);
+    }
+}
+
+void test_client_401_from_oauth2_enabled_server_carries_error_code() {
+    LiveServer server;
+    server.router.set_oauth2_secret("test-secret");
+    SovdClient cli(server.base_url(), RetryPolicy{3, 1});
+    try {
+        cli.list_entities();
+        ASSERT_TRUE(false);
+    } catch (const SovdError &ex) {
+        ASSERT_EQ(ex.status, 401);
+        ASSERT_EQ(ex.code, std::string("UNAUTHORIZED"));
+    }
+}
+
+void test_client_retries_503_then_succeeds() {
+    ScriptedServer server({503, 504, 200});
+    SovdClient cli(server.base_url(), RetryPolicy{3, 1});
+    ASSERT_EQ(list_entities_status(cli), -1);
+    ASSERT_EQ(server.hits.load(), 3);
+}
+
+void test_client_503_gives_up_after_max_retries() {
+    ScriptedServer server({503});
+    SovdClient cli(server.base_url(), RetryPolicy{2, 1});
+    ASSERT_EQ(list_entities_status(cli), 503);
+    ASSERT_EQ(server.hits.load(), 3); // initial attempt + 2 retries
+}
+
+void test_client_423_is_not_retried() {
+    ScriptedServer server({423});
+    SovdClient cli(server.base_url(), RetryPolicy{3, 1});
+    ASSERT_EQ(list_entities_status(cli), 423);
+    ASSERT_EQ(server.hits.load(), 1);
+}
+
 } // namespace
 
 int main() {
@@ -283,5 +368,10 @@ int main() {
     RUN_TEST(test_client_mode_and_operation);
     RUN_TEST(test_client_subscribe_data_receives_pushed_events);
     RUN_TEST(test_client_subscribe_data_throws_on_immediate_failure);
+    RUN_TEST(test_client_401_and_403_are_not_retried);
+    RUN_TEST(test_client_401_from_oauth2_enabled_server_carries_error_code);
+    RUN_TEST(test_client_retries_503_then_succeeds);
+    RUN_TEST(test_client_503_gives_up_after_max_retries);
+    RUN_TEST(test_client_423_is_not_retried);
     return testfw::summary();
 }

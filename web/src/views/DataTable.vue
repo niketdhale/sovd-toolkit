@@ -123,6 +123,7 @@ watch(
   },
   { immediate: true },
 )
+defineExpose({ refresh: () => load() })
 </script>
 
 <template>

@@ -62,6 +62,7 @@ async function clearFaults() {
 }
 
 watch(() => [props.path, statusFilter.value], load, { immediate: true })
+defineExpose({ refresh: () => load() })
 </script>
 
 <template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import Icon from './components/Icon.vue'
-import { ref, computed, watch, watchEffect, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, watchEffect, nextTick, onMounted, onUnmounted } from 'vue'
 import { SovdClient, SovdError, type EntityInfo } from './api/sovdClient'
 import EntityBrowser from './views/EntityBrowser.vue'
 import FaultViewer from './views/FaultViewer.vue'
@@ -66,8 +66,30 @@ const hash = computed(() => `#/${tab.value}${selectedPath.value ? '/' + selected
 watch(hash, (h) => {
   if (client.value && location.hash !== h) location.hash = h
 })
-onMounted(() => window.addEventListener('hashchange', onHash))
-onUnmounted(() => window.removeEventListener('hashchange', onHash))
+const view = ref<{ refresh?: () => void } | null>(null)
+async function onKey(e: KeyboardEvent) {
+  const el = e.target as HTMLElement
+  if (e.ctrlKey || e.metaKey || e.altKey || !client.value) return
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) || el.isContentEditable) return
+  if (e.key >= '1' && e.key <= '4') tab.value = tabs[Number(e.key) - 1].id
+  else if (e.key === '/') {
+    e.preventDefault()
+    tab.value = 'entities'
+    await nextTick()
+    document.getElementById('entity-search')?.focus()
+  } else if (e.key === 'r') {
+    if (tab.value === 'entities') client.value.listEntities().then((l) => (entities.value = l)).catch(() => {})
+    else view.value?.refresh?.()
+  }
+}
+onMounted(() => {
+  window.addEventListener('hashchange', onHash)
+  window.addEventListener('keydown', onKey)
+})
+onUnmounted(() => {
+  window.removeEventListener('hashchange', onHash)
+  window.removeEventListener('keydown', onKey)
+})
 function onHash() {
   if (client.value) readHash()
 }
@@ -203,6 +225,11 @@ function selectEntity(path: string) {
               {{ t.label }}
             </button>
           </div>
+          <span
+            class="hidden cursor-help rounded border border-gray-300 px-1.5 text-xs text-gray-500 sm:block dark:border-white/20 dark:text-gray-400"
+            title="Keyboard shortcuts: 1-4 switch tabs, / filter entities, r refresh"
+            aria-label="Keyboard shortcuts: 1 to 4 switch tabs, slash filters entities, r refreshes"
+          >?</span>
           <p v-if="selectedEntity" class="hidden text-sm text-gray-500 sm:block dark:text-gray-400">
             selected
             <code class="ml-1 rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-700 dark:bg-white/10 dark:text-gray-300">{{
@@ -231,9 +258,9 @@ function selectEntity(path: string) {
 
     <main v-if="client" class="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
       <EntityBrowser v-if="tab === 'entities'" :entities="entities" @select="selectEntity" />
-      <FaultViewer v-else-if="tab === 'faults'" :client="client" :path="selectedPath" />
-      <DataTable v-else-if="tab === 'data'" :client="client" :path="selectedPath" />
-      <LiveChart v-else-if="tab === 'live'" :client="client" :path="selectedPath" />
+      <FaultViewer v-else-if="tab === 'faults'" ref="view" :client="client" :path="selectedPath" />
+      <DataTable v-else-if="tab === 'data'" ref="view" :client="client" :path="selectedPath" />
+      <LiveChart v-else-if="tab === 'live'" ref="view" :client="client" :path="selectedPath" />
     </main>
 
     <main v-else role="status" class="mx-auto flex max-w-6xl flex-col items-center px-4 py-24 text-center sm:px-6 lg:px-8">

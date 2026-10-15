@@ -148,6 +148,7 @@ const svgPoints = computed(() => {
 
 watch(() => props.path, loadDocs, { immediate: true })
 onUnmounted(closeStream)
+defineExpose({ refresh: () => loadDocs() })
 </script>
 
 <template>

@@ -58,10 +58,36 @@ curl -N "http://127.0.0.1:20003/v1/entities/vehicle/body/bcm/data/battery_voltag
 
 ```bash
 ./build/sovd_server config/domain_body.yaml &   # cors_allowed_origins already includes :5173
-cd web && npm install && npm run dev
+cd web && bun install && bun run dev
 # open http://localhost:5173, enter the server's base URL, click Connect
 ```
-Four screens: Entity Browser, Fault Viewer (read + filter + clear), Data
+The default base URL can be set with `VITE_SOVD_BASE_URL` (`web/.env.example`).
+
+**Hosted by the server** (optional, off by default): build once, then point
+`--web-root` (or `SOVD_WEB_ROOT`) at the output.
+```bash
+(cd web && bun run build)             # -> web/dist
+./build/sovd_server --web-root web/dist config/domain_body.yaml &
+# open http://localhost:20003/index.html -- same origin, no CORS needed
+```
+`GET /` stays the JSON API self-description; the UI is served at `/index.html`
+(other non-API GET paths fall back to it). Web checks: `bun run lint`,
+`bun run test:run`, `bun run build` (all run in CI).
+
+Features: entity filter + tree view; fault status badges; data copy,
+Raw JSON toggle and auto-refresh; live chart with time window, latest-value
+readout, pause and auto-reconnect; toast notifications; dark mode; the view is
+kept in the URL hash (`#/<tab>/<entity path>`). Screenshots:
+[`docs/screenshots/`](screenshots/).
+
+| Key | Action |
+|---|---|
+| `1` `2` `3` `4` | Switch tab (Entities, Faults, Data, Live) |
+| `/` | Focus the entity filter |
+| `r` | Refresh the current view |
+
+Shortcuts are ignored while typing in a field.
+Four screens (tabs `1`-`4`): Entity Browser, Fault Viewer (read + filter + clear), Data
 Table (typed read/write widgets built purely from `/docs` — an enum
 `<select>`, a numeric input with its unit, a length-capped text field,
 nothing hardcoded per-entity), Live Chart (SSE + a hand-rolled SVG polyline).
@@ -71,7 +97,7 @@ what running them together actually looks like):
 ```bash
 SOVD_OAUTH2_SECRET=demo-secret ./build/sovd_server config/domain_body_auth.yaml &
 ./build/sovd_mint_token demo-secret read:data,execute:routines,read:faults 3600
-cd web && npm run dev
+cd web && bun run dev
 # open http://localhost:5173, paste the minted token into the token field
 # next to the base URL, click Connect
 ```

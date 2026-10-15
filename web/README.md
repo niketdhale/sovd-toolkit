@@ -20,8 +20,8 @@ cd .. && ./build/sovd_server config/domain_body.yaml &
 
 # 2. Start the UI.
 cd web
-npm install
-npm run dev
+bun install
+bun run dev
 ```
 
 Open <http://localhost:5173>, enter the domain server's base URL (defaults
@@ -54,6 +54,6 @@ No browser automation was available in the session that built this — every
 API call pattern each screen makes (docs, batch read, typed write, the full
 lock/heartbeat/release cycle, the SSE stream) was verified live with curl
 using the real `Origin: http://localhost:5173` header against a real
-running domain server, and `npm run build`/`vue-tsc` type-check clean. The
+running domain server, and `bun run build`/`vue-tsc` type-check clean. The
 actual rendered UI (layout, click-through, console errors) has **not** been
 visually exercised in a browser — do that before treating this as done.

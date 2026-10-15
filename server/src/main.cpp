@@ -75,6 +75,19 @@ struct AuditLog {
 } // namespace
 
 int main(int argc, char **argv) {
+    // Optional `--web-root <dir>` (or SOVD_WEB_ROOT): host the static web UI.
+    // Stripped from argv here so the positional parsing below is unchanged.
+    std::string web_root;
+    if (const char *wr = std::getenv("SOVD_WEB_ROOT")) web_root = wr;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (std::string(argv[i]) == "--web-root") {
+            web_root = argv[i + 1];
+            for (int j = i; j + 2 < argc; ++j) argv[j] = argv[j + 2];
+            argc -= 2;
+            break;
+        }
+    }
+
     // Phase 4: `./sovd_server <config.yaml>` loads a topology; anything
     // else (no args, or `./sovd_server <port> [role]`) keeps the original
     // hardcoded demo unchanged — an existing-regular-file check is enough
@@ -226,6 +239,11 @@ int main(int argc, char **argv) {
     if (const char *oauth2_secret = std::getenv("SOVD_OAUTH2_SECRET")) {
         router.set_oauth2_secret(oauth2_secret);
         std::cout << "OAuth2 bearer-token validation enabled" << std::endl;
+    }
+
+    if (!web_root.empty()) {
+        router.set_web_root(web_root);
+        std::cout << "serving web UI from " << web_root << std::endl;
     }
 
     // mDNS advertising is opt-in the same way MQTT is -- unset means no

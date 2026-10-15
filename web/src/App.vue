@@ -19,6 +19,7 @@ const baseUrlInput = ref(savedUrl ?? import.meta.env.VITE_SOVD_BASE_URL ?? 'http
 const tokenInput = ref('')
 const connectError = ref<string | null>(null)
 const connecting = ref(false)
+const editing = ref(false) // expands the connect form while connected
 const client = ref<SovdClient | null>(null)
 const serverId = ref('')
 const role = ref('')
@@ -67,6 +68,7 @@ async function connect() {
     role.value = root.role
     entities.value = list
     client.value = c
+    editing.value = false
     // Only the URL is remembered -- never the token.
     try { localStorage.setItem('baseUrl', url) } catch { /* ignore */ }
   } catch (e) {
@@ -102,7 +104,7 @@ function selectEntity(path: string) {
             <h1 class="text-base font-semibold text-gray-900 dark:text-white">SOVD Toolkit</h1>
           </div>
 
-          <form class="flex min-w-0 flex-1 flex-wrap items-center gap-2" @submit.prevent="connect">
+          <form v-if="!client || editing" class="flex min-w-0 flex-1 flex-wrap items-center gap-2" @submit.prevent="connect">
             <label for="base-url" class="sr-only">Server base URL</label>
             <input
               id="base-url"
@@ -124,6 +126,14 @@ function selectEntity(path: string) {
               {{ connecting ? 'Connecting…' : client ? 'Reconnect' : 'Connect' }}
             </button>
           </form>
+          <div v-else class="flex min-w-0 flex-1 items-center gap-2">
+            <span class="badge badge-gray min-w-0">
+              <span class="truncate">connected to {{ client.baseUrl }}</span>
+            </span>
+            <button type="button" class="btn btn-secondary" aria-label="Edit connection" @click="editing = true">
+              <Icon name="pencil" class="size-4" />Edit
+            </button>
+          </div>
 
           <div class="flex flex-wrap items-center gap-2 text-sm" role="status" aria-live="polite">
             <template v-if="client">

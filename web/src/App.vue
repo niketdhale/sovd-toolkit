@@ -120,7 +120,7 @@ function selectEntity(path: string) {
             </button>
           </form>
 
-          <div class="flex items-center gap-2 text-sm" role="status" aria-live="polite">
+          <div class="flex flex-wrap items-center gap-2 text-sm" role="status" aria-live="polite">
             <template v-if="client">
               <span class="badge badge-green">
                 <span class="mr-1.5 size-1.5 rounded-full bg-green-500"></span>

@@ -19,7 +19,7 @@ const emit = defineEmits<{ select: [path: string] }>()
         <thead class="bg-gray-50 dark:bg-white/5">
           <tr>
             <th class="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6 dark:text-white">Path</th>
-            <th class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900 dark:text-white">Type</th>
+            <th class="hidden px-3 py-3.5 text-left text-sm font-semibold text-gray-900 sm:table-cell dark:text-white">Type</th>
             <th class="px-3 py-3.5 text-left text-sm font-semibold text-gray-900 dark:text-white">Backend</th>
             <th class="py-3.5 pl-3 pr-4 sm:pr-6"></th>
           </tr>
@@ -27,7 +27,7 @@ const emit = defineEmits<{ select: [path: string] }>()
         <tbody class="divide-y divide-gray-200 dark:divide-white/10">
           <tr v-for="e in entities" :key="e.path" class="hover:bg-gray-50 dark:hover:bg-white/5">
             <td class="py-4 pl-4 pr-3 font-mono text-sm text-gray-900 sm:pl-6 dark:text-gray-100">{{ e.path }}</td>
-            <td class="px-3 py-4 text-sm text-gray-500 dark:text-gray-400">{{ e.type }}</td>
+            <td class="hidden px-3 py-4 text-sm text-gray-500 sm:table-cell dark:text-gray-400">{{ e.type }}</td>
             <td class="px-3 py-4 text-sm">
               <span :class="e.has_backend ? 'badge badge-green' : 'badge badge-gray'">{{ e.has_backend ? 'yes' : 'no' }}</span>
             </td>

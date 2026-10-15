@@ -10,7 +10,9 @@ import LiveChart from './views/LiveChart.vue'
 // D1 (settled 2026-08-20): points at a domain server directly, not the
 // gateway -- streaming through a Phase 4 proxy is a deliberate 501, so
 // screen 4 can't run against the gateway tier.
-const baseUrlInput = ref(import.meta.env.VITE_SOVD_BASE_URL ?? 'http://localhost:20003')
+let savedUrl: string | null = null
+try { savedUrl = localStorage.getItem('baseUrl') } catch { /* ignore */ }
+const baseUrlInput = ref(savedUrl ?? import.meta.env.VITE_SOVD_BASE_URL ?? 'http://localhost:20003')
 // docs/reviews/round-1.md Task 1b: optional -- an unauthenticated server
 // (this project's default demo config) never checks this at all, matching
 // SovdClient.token's own "unset means no Authorization header" behavior.
@@ -65,6 +67,8 @@ async function connect() {
     role.value = root.role
     entities.value = list
     client.value = c
+    // Only the URL is remembered -- never the token.
+    try { localStorage.setItem('baseUrl', url) } catch { /* ignore */ }
   } catch (e) {
     // docs/reviews/round-1.md Task 1b: 401 ("no/invalid token") and 403
     // ("valid token, wrong scope") are different user problems -- the

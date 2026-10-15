@@ -126,7 +126,7 @@ function selectEntity(path: string) {
               {{ connecting ? 'Connecting…' : client ? 'Reconnect' : 'Connect' }}
             </button>
           </form>
-          <div v-else class="flex min-w-0 flex-1 items-center gap-2">
+          <div v-else class="flex min-w-0 basis-full items-center gap-2 sm:basis-0 sm:flex-1">
             <span class="badge badge-gray min-w-0">
               <span class="truncate">connected to {{ client.baseUrl }}</span>
             </span>

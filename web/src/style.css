@@ -49,6 +49,13 @@ body {
     @apply block rounded-md bg-white px-3 py-1.5 text-sm text-gray-900 outline outline-1 -outline-offset-1 outline-gray-300 placeholder:text-gray-400 focus:outline focus:outline-2 focus:-outline-offset-2 focus:outline-indigo-600 dark:bg-white/5 dark:text-white dark:outline-white/10;
   }
 
+  .alert-error {
+    @apply mb-4 flex items-center justify-between gap-3 rounded-md bg-red-50 p-4 text-sm text-red-700 ring-1 ring-inset ring-red-600/10 dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/20;
+  }
+  .skeleton {
+    @apply animate-pulse rounded bg-gray-200 dark:bg-white/10;
+  }
+
   .badge {
     @apply inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset;
   }

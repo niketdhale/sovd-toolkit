@@ -14,6 +14,7 @@ const values = ref<Record<string, DataValue>>({})
 const drafts = ref<Record<string, string>>({})
 const error = ref<string | null>(null)
 const writingId = ref<string | null>(null)
+const loading = ref(false)
 
 const lock = useLock(props.client, () => props.path!)
 const editMode = computed(() => lock.lockId.value !== null)
@@ -29,6 +30,7 @@ async function load() {
   values.value = {}
   if (!props.path) return
   error.value = null
+  loading.value = true
   try {
     const d = await props.client.getDocs(props.path)
     docs.value = d
@@ -47,6 +49,8 @@ async function load() {
     drafts.value = draftMap
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    loading.value = false
   }
 }
 
@@ -105,9 +109,12 @@ watch(
       </div>
     </div>
 
-    <p v-if="error" class="mb-3 text-sm text-red-600 dark:text-red-400">{{ error }}</p>
+    <div v-if="error" role="alert" class="alert-error">
+      <span>{{ error }}</span>
+      <button type="button" class="btn btn-secondary shrink-0" @click="load">Retry</button>
+    </div>
 
-    <div class="card overflow-hidden">
+    <div class="card overflow-x-auto">
       <table class="min-w-full divide-y divide-gray-200 dark:divide-white/10">
         <thead class="bg-gray-50 dark:bg-white/5">
           <tr>
@@ -120,6 +127,10 @@ watch(
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-200 dark:divide-white/10">
+          <tr v-for="n in loading && !docs ? 4 : 0" :key="'s' + n">
+            <td v-for="c in 5" :key="c" class="px-3 py-4 first:pl-4 sm:first:pl-6"><div class="skeleton h-4 w-20"></div></td>
+            <td></td>
+          </tr>
           <tr v-for="item in docs?.data ?? []" :key="item.id" class="hover:bg-gray-50 dark:hover:bg-white/5">
             <td class="py-4 pl-4 pr-3 font-mono text-sm text-gray-900 sm:pl-6 dark:text-gray-100">{{ item.id }}</td>
             <td class="px-3 py-4 font-mono text-sm text-gray-400 dark:text-gray-500">{{ item.did }}</td>
@@ -158,7 +169,8 @@ watch(
         </tbody>
       </table>
       <div v-if="docs && docs.data.length === 0" class="px-6 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
-        No named data items in this entity's catalog.
+        <p class="text-2xl">📭</p>
+        <p class="mt-2">No named data items in this entity's catalog.</p>
       </div>
     </div>
   </div>

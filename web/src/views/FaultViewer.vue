@@ -20,6 +20,7 @@ async function load() {
   if (!props.path) return
   loading.value = true
   error.value = null
+  faults.value = []
   try {
     faults.value = await props.client.getFaults(props.path, statusFilter.value)
   } catch (e) {
@@ -79,9 +80,12 @@ watch(() => [props.path, statusFilter.value], load, { immediate: true })
       </div>
     </div>
 
-    <p v-if="error" class="mb-3 text-sm text-red-600 dark:text-red-400">{{ error }}</p>
+    <div v-if="error" role="alert" class="alert-error">
+      <span>{{ error }}</span>
+      <button type="button" class="btn btn-secondary shrink-0" @click="load">Retry</button>
+    </div>
 
-    <div class="card overflow-hidden">
+    <div class="card overflow-x-auto">
       <table class="min-w-full divide-y divide-gray-200 dark:divide-white/10">
         <thead class="bg-gray-50 dark:bg-white/5">
           <tr>
@@ -90,14 +94,19 @@ watch(() => [props.path, statusFilter.value], load, { immediate: true })
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-200 dark:divide-white/10">
+          <tr v-for="n in loading && faults.length === 0 ? 3 : 0" :key="'s' + n">
+            <td class="py-4 pl-4 pr-3 sm:pl-6"><div class="skeleton h-4 w-24"></div></td>
+            <td class="px-3 py-4"><div class="skeleton h-5 w-16"></div></td>
+          </tr>
           <tr v-for="f in faults" :key="f.code" class="hover:bg-gray-50 dark:hover:bg-white/5">
             <td class="py-4 pl-4 pr-3 font-mono text-sm text-gray-900 sm:pl-6 dark:text-gray-100">{{ f.code }}</td>
             <td class="px-3 py-4 text-sm"><span :class="badgeFor(f.status)">{{ f.status }}</span></td>
           </tr>
         </tbody>
       </table>
-      <div v-if="!loading && faults.length === 0" class="px-6 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
-        No faults{{ statusFilter ? ` with status "${statusFilter}"` : '' }}.
+      <div v-if="!loading && !error && faults.length === 0" class="px-6 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
+        <p class="text-2xl">✅</p>
+        <p class="mt-2">All clear — no faults{{ statusFilter ? ` with status "${statusFilter}"` : '' }}.</p>
       </div>
     </div>
   </div>

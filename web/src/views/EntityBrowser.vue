@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Icon from '../components/Icon.vue'
 import type { EntityInfo } from '../api/sovdClient'
 
 // Screen 1. Zero knowledge of any specific ECU: renders exactly whatever
@@ -40,7 +41,7 @@ const emit = defineEmits<{ select: [path: string] }>()
         </tbody>
       </table>
       <div v-if="entities.length === 0" class="px-6 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
-        <p class="text-2xl">🛰️</p>
+        <Icon name="server" class="mx-auto size-8 text-gray-400 dark:text-gray-500" />
         <p class="mt-2">This server reports no entities yet.</p>
       </div>
     </div>

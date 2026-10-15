@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Icon from '../components/Icon.vue'
 import { ref, watch, onUnmounted, computed } from 'vue'
 import type { SovdClient, DocsResult } from '../api/sovdClient'
 
@@ -119,7 +120,7 @@ onUnmounted(closeStream)
 
 <template>
   <div v-if="!path" class="card flex flex-col items-center px-6 py-16 text-center">
-    <span class="flex size-10 items-center justify-center rounded-full bg-gray-100 text-lg dark:bg-white/10">⚠</span>
+    <span class="flex size-10 items-center justify-center rounded-full bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-400"><Icon name="warning" class="size-5" /></span>
     <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">Select an entity from the Entities tab first.</p>
   </div>
   <div v-else>
@@ -155,10 +156,10 @@ onUnmounted(closeStream)
       </div>
       <div v-if="error" role="alert" class="alert-error mt-4 mb-0">
         <span>{{ error }}</span>
-        <button type="button" class="btn btn-secondary shrink-0" @click="docs ? startStream() : loadDocs()">Retry</button>
+        <button type="button" class="btn btn-secondary shrink-0" @click="docs ? startStream() : loadDocs()"><Icon name="retry" class="size-4" />Retry</button>
       </div>
       <p v-if="!loadingDocs && !error && !selectedId" class="mt-5 border-t border-gray-100 pt-5 text-center text-sm text-gray-500 dark:border-white/10 dark:text-gray-400">
-        📈 Pick a data id and start streaming to see live values here.
+        <Icon name="chart" class="mr-1 inline size-4 align-text-bottom text-gray-400 dark:text-gray-500" />Pick a data id and start streaming to see live values here.
       </p>
 
       <div v-if="selectedItem?.type === 'float'" class="mt-5 border-t border-gray-100 pt-5 dark:border-white/10">

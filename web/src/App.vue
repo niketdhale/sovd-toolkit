@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Icon from './components/Icon.vue'
 import { ref, computed, watchEffect } from 'vue'
 import { SovdClient, SovdError, type EntityInfo } from './api/sovdClient'
 import EntityBrowser from './views/EntityBrowser.vue'
@@ -143,7 +144,8 @@ function selectEntity(path: string) {
               aria-label="Toggle dark mode"
               @click="dark = !dark"
             >
-              {{ dark ? '☀ Light' : '☾ Dark' }}
+              <Icon :name="dark ? 'sun' : 'moon'" class="size-4" />
+              {{ dark ? 'Light' : 'Dark' }}
             </button>
           </div>
         </div>
@@ -186,7 +188,7 @@ function selectEntity(path: string) {
     </main>
 
     <main v-else role="status" class="mx-auto flex max-w-6xl flex-col items-center px-4 py-24 text-center sm:px-6 lg:px-8">
-      <span class="flex size-12 items-center justify-center rounded-full bg-indigo-50 text-2xl dark:bg-indigo-500/10">🔌</span>
+      <span class="flex size-12 items-center justify-center rounded-full bg-indigo-50 dark:bg-indigo-500/10"><Icon name="plug" class="size-6 text-indigo-600 dark:text-indigo-400" /></span>
       <h2 class="mt-4 text-base font-semibold text-gray-900 dark:text-white">Not connected</h2>
       <p class="mt-1 max-w-sm text-sm text-gray-500 dark:text-gray-400">
         Enter a domain server's base URL above and click Connect to browse its entities, faults, and live data.

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Icon from '../components/Icon.vue'
 import { ref, watch, computed } from 'vue'
 import type { SovdClient, DocsResult, DataItemDoc, DataValue } from '../api/sovdClient'
 import { useLock } from '../composables/useLock'
@@ -92,7 +93,7 @@ watch(
 
 <template>
   <div v-if="!path" class="card flex flex-col items-center px-6 py-16 text-center">
-    <span class="flex size-10 items-center justify-center rounded-full bg-gray-100 text-lg dark:bg-white/10">⚠</span>
+    <span class="flex size-10 items-center justify-center rounded-full bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-400"><Icon name="warning" class="size-5" /></span>
     <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">Select an entity from the Entities tab first.</p>
   </div>
   <div v-else>
@@ -111,7 +112,7 @@ watch(
 
     <div v-if="error" role="alert" class="alert-error">
       <span>{{ error }}</span>
-      <button type="button" class="btn btn-secondary shrink-0" @click="load">Retry</button>
+      <button type="button" class="btn btn-secondary shrink-0" @click="load"><Icon name="retry" class="size-4" />Retry</button>
     </div>
 
     <div class="card overflow-x-auto">
@@ -169,7 +170,7 @@ watch(
         </tbody>
       </table>
       <div v-if="docs && docs.data.length === 0" class="px-6 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
-        <p class="text-2xl">📭</p>
+        <Icon name="inbox" class="mx-auto size-8 text-gray-400 dark:text-gray-500" />
         <p class="mt-2">No named data items in this entity's catalog.</p>
       </div>
     </div>

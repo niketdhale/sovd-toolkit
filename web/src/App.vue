@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import Icon from './components/Icon.vue'
+import { ref, computed, watchEffect } from 'vue'
 import { SovdClient, SovdError, type EntityInfo } from './api/sovdClient'
 import EntityBrowser from './views/EntityBrowser.vue'
 import FaultViewer from './views/FaultViewer.vue'
@@ -19,6 +20,22 @@ const connecting = ref(false)
 const client = ref<SovdClient | null>(null)
 const serverId = ref('')
 const role = ref('')
+
+// Dark mode: stored choice, else OS preference. Storage may be unavailable.
+let saved: string | null = null
+try { saved = localStorage.getItem('theme') } catch { /* ignore */ }
+const dark = ref(saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches)
+watchEffect(() => {
+  document.documentElement.classList.toggle('dark', dark.value)
+  try { localStorage.setItem('theme', dark.value ? 'dark' : 'light') } catch { /* ignore */ }
+})
+
+function disconnect() {
+  client.value = null
+  entities.value = []
+  selectedPath.value = null
+  tab.value = 'entities'
+}
 
 const entities = ref<EntityInfo[]>([])
 const selectedPath = ref<string | null>(null)
@@ -81,14 +98,18 @@ function selectEntity(path: string) {
             <h1 class="text-base font-semibold text-gray-900 dark:text-white">SOVD Toolkit</h1>
           </div>
 
-          <form class="flex flex-1 items-center gap-2" @submit.prevent="connect">
+          <form class="flex min-w-0 flex-1 flex-wrap items-center gap-2" @submit.prevent="connect">
+            <label for="base-url" class="sr-only">Server base URL</label>
             <input
+              id="base-url"
               v-model="baseUrlInput"
               type="text"
               class="field w-full max-w-xs"
               placeholder="http://localhost:20003"
             />
+            <label for="token" class="sr-only">Bearer token</label>
             <input
+              id="token"
               v-model="tokenInput"
               type="password"
               class="field w-full max-w-xs"
@@ -100,20 +121,40 @@ function selectEntity(path: string) {
             </button>
           </form>
 
-          <div v-if="client" class="flex items-center gap-2 text-sm">
-            <span class="badge badge-green">
-              <span class="mr-1 size-1.5 rounded-full bg-green-500"></span>
-              {{ serverId }}
+          <div class="flex flex-wrap items-center gap-2 text-sm" role="status" aria-live="polite">
+            <template v-if="client">
+              <span class="badge badge-green">
+                <span class="mr-1.5 size-1.5 rounded-full bg-green-500"></span>
+                Connected · {{ serverId }}
+              </span>
+              <span class="badge badge-gray capitalize">{{ role }}</span>
+              <button type="button" class="btn btn-secondary" @click="disconnect">Disconnect</button>
+            </template>
+            <span v-else-if="connecting" class="badge badge-amber">
+              <span class="mr-1.5 size-1.5 animate-pulse rounded-full bg-amber-500"></span>Connecting…
             </span>
-            <span class="badge badge-gray capitalize">{{ role }}</span>
+            <span v-else class="badge badge-gray">
+              <span class="mr-1.5 size-1.5 rounded-full" :class="connectError ? 'bg-red-500' : 'bg-gray-400'"></span>
+              {{ connectError ? 'Connection failed' : 'Disconnected' }}
+            </span>
+            <button
+              type="button"
+              class="btn btn-secondary"
+              :aria-pressed="dark"
+              aria-label="Toggle dark mode"
+              @click="dark = !dark"
+            >
+              <Icon :name="dark ? 'sun' : 'moon'" class="size-4" />
+              {{ dark ? 'Light' : 'Dark' }}
+            </button>
           </div>
         </div>
-        <p v-if="connectError" class="mt-2 text-sm text-red-600 dark:text-red-400">{{ connectError }}</p>
+        <p v-if="connectError" role="alert" class="mt-2 text-sm text-red-600 dark:text-red-400">{{ connectError }}</p>
       </div>
 
-      <nav v-if="client" class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
-        <div class="flex items-center justify-between border-t border-gray-100 dark:border-white/5">
-          <div class="-mb-px flex gap-6">
+      <nav v-if="client" aria-label="Sections" class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
+        <div class="flex items-center justify-between gap-4 border-t border-gray-100 dark:border-white/5">
+          <div class="-mb-px flex gap-6 overflow-x-auto">
             <button
               v-for="t in tabs"
               :key="t.id"
@@ -123,6 +164,7 @@ function selectEntity(path: string) {
                   ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
                   : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
               "
+              :aria-current="tab === t.id ? 'page' : undefined"
               @click="tab = t.id"
             >
               {{ t.label }}
@@ -145,8 +187,8 @@ function selectEntity(path: string) {
       <LiveChart v-else-if="tab === 'live'" :client="client" :path="selectedPath" />
     </main>
 
-    <main v-else class="mx-auto flex max-w-6xl flex-col items-center px-4 py-24 text-center sm:px-6 lg:px-8">
-      <span class="flex size-12 items-center justify-center rounded-full bg-indigo-50 text-2xl dark:bg-indigo-500/10">🔌</span>
+    <main v-else role="status" class="mx-auto flex max-w-6xl flex-col items-center px-4 py-24 text-center sm:px-6 lg:px-8">
+      <span class="flex size-12 items-center justify-center rounded-full bg-indigo-50 dark:bg-indigo-500/10"><Icon name="plug" class="size-6 text-indigo-600 dark:text-indigo-400" /></span>
       <h2 class="mt-4 text-base font-semibold text-gray-900 dark:text-white">Not connected</h2>
       <p class="mt-1 max-w-sm text-sm text-gray-500 dark:text-gray-400">
         Enter a domain server's base URL above and click Connect to browse its entities, faults, and live data.

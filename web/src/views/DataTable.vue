@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Icon from '../components/Icon.vue'
 import { ref, watch, computed } from 'vue'
 import type { SovdClient, DocsResult, DataItemDoc, DataValue } from '../api/sovdClient'
 import { useLock } from '../composables/useLock'
@@ -14,6 +15,7 @@ const values = ref<Record<string, DataValue>>({})
 const drafts = ref<Record<string, string>>({})
 const error = ref<string | null>(null)
 const writingId = ref<string | null>(null)
+const loading = ref(false)
 
 const lock = useLock(props.client, () => props.path!)
 const editMode = computed(() => lock.lockId.value !== null)
@@ -29,6 +31,7 @@ async function load() {
   values.value = {}
   if (!props.path) return
   error.value = null
+  loading.value = true
   try {
     const d = await props.client.getDocs(props.path)
     docs.value = d
@@ -47,6 +50,8 @@ async function load() {
     drafts.value = draftMap
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    loading.value = false
   }
 }
 
@@ -88,7 +93,7 @@ watch(
 
 <template>
   <div v-if="!path" class="card flex flex-col items-center px-6 py-16 text-center">
-    <span class="flex size-10 items-center justify-center rounded-full bg-gray-100 text-lg dark:bg-white/10">⚠</span>
+    <span class="flex size-10 items-center justify-center rounded-full bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-400"><Icon name="warning" class="size-5" /></span>
     <p class="mt-3 text-sm text-gray-500 dark:text-gray-400">Select an entity from the Entities tab first.</p>
   </div>
   <div v-else>
@@ -105,9 +110,12 @@ watch(
       </div>
     </div>
 
-    <p v-if="error" class="mb-3 text-sm text-red-600 dark:text-red-400">{{ error }}</p>
+    <div v-if="error" role="alert" class="alert-error">
+      <span>{{ error }}</span>
+      <button type="button" class="btn btn-secondary shrink-0" @click="load"><Icon name="retry" class="size-4" />Retry</button>
+    </div>
 
-    <div class="card overflow-hidden">
+    <div class="card overflow-x-auto">
       <table class="min-w-full divide-y divide-gray-200 dark:divide-white/10">
         <thead class="bg-gray-50 dark:bg-white/5">
           <tr>
@@ -120,6 +128,10 @@ watch(
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-200 dark:divide-white/10">
+          <tr v-for="n in loading && !docs ? 4 : 0" :key="'s' + n">
+            <td v-for="c in 5" :key="c" class="px-3 py-4 first:pl-4 sm:first:pl-6"><div class="skeleton h-4 w-20"></div></td>
+            <td></td>
+          </tr>
           <tr v-for="item in docs?.data ?? []" :key="item.id" class="hover:bg-gray-50 dark:hover:bg-white/5">
             <td class="py-4 pl-4 pr-3 font-mono text-sm text-gray-900 sm:pl-6 dark:text-gray-100">{{ item.id }}</td>
             <td class="px-3 py-4 font-mono text-sm text-gray-400 dark:text-gray-500">{{ item.did }}</td>
@@ -158,7 +170,8 @@ watch(
         </tbody>
       </table>
       <div v-if="docs && docs.data.length === 0" class="px-6 py-12 text-center text-sm text-gray-500 dark:text-gray-400">
-        No named data items in this entity's catalog.
+        <Icon name="inbox" class="mx-auto size-8 text-gray-400 dark:text-gray-500" />
+        <p class="mt-2">No named data items in this entity's catalog.</p>
       </div>
     </div>
   </div>

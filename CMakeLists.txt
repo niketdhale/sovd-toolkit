@@ -102,6 +102,12 @@ endif()
 add_library(sovd_server_lib STATIC
     server/src/routes.cpp
     server/src/static_files.cpp
+    server/src/routes_util.cpp
+    server/src/routes_faults.cpp
+    server/src/routes_data.cpp
+    server/src/routes_streams.cpp
+    server/src/routes_operations.cpp
+    server/src/routes_locks.cpp
     server/src/mqtt_publisher.cpp
     server/src/stream_hub.cpp
     server/src/oauth2.cpp

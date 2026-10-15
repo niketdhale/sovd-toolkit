@@ -101,6 +101,7 @@ endif()
 # --- server: HTTP layer, no diagnostic logic ---
 add_library(sovd_server_lib STATIC
     server/src/routes.cpp
+    server/src/static_files.cpp
     server/src/mqtt_publisher.cpp
     server/src/stream_hub.cpp
     server/src/oauth2.cpp

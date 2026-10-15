@@ -340,6 +340,7 @@ void Router::set_event_sink(EventSink sink) { event_sink_ = std::move(sink); }
 void Router::set_telemetry_sink(EventSink sink) { telemetry_sink_ = std::move(sink); }
 void Router::set_cors_allowed_origins(std::vector<std::string> origins) { cors_allowed_origins_ = std::move(origins); }
 void Router::set_oauth2_secret(std::string secret) { oauth2_secret_ = std::move(secret); }
+void Router::set_web_root(std::string dir) { web_root_ = std::move(dir); }
 
 bool Router::has_oauth2_scope(const httplib::Request &req, const std::string &scope) const {
     if (oauth2_secret_.empty()) return true;
@@ -418,6 +419,8 @@ void Router::register_routes(httplib::Server &svr) {
             res.status = 204;
             return httplib::Server::HandlerResponse::Handled;
         }
+
+        if (!web_root_.empty() && serve_static_file(web_root_, req, res)) return httplib::Server::HandlerResponse::Handled;
 
         apply_cors_headers(req, res);
 

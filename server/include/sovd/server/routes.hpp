@@ -116,6 +116,9 @@ public:
     // reasoning as everything else added in Phase 8. See oauth2.hpp for
     // what the token scheme does and deliberately doesn't cover.
     void set_oauth2_secret(std::string secret);
+    // Optional static web UI hosting (off when empty): GET of non-/v1 paths is
+    // served from this directory, ahead of the gateway/OAuth2 checks.
+    void set_web_root(std::string dir);
 
 private:
     void handle_root(const httplib::Request &req, httplib::Response &res);
@@ -207,7 +210,10 @@ private:
     StreamHub stream_hub_;
     std::vector<std::string> cors_allowed_origins_;
     std::string oauth2_secret_;
+    std::string web_root_;
     StreamTicketStore stream_tickets_;
 };
+
+bool serve_static_file(const std::string &root, const httplib::Request &req, httplib::Response &res);
 
 } // namespace sovd::server

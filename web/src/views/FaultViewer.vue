@@ -2,12 +2,14 @@
 import Icon from '../components/Icon.vue'
 import { ref, watch, computed } from 'vue'
 import type { SovdClient, FaultInfo } from '../api/sovdClient'
+import { useToast } from '../composables/useToast'
 
 const props = defineProps<{ client: SovdClient; path: string | null }>()
 
 const faults = ref<FaultInfo[]>([])
 const statusFilter = ref('')
 const error = ref<string | null>(null)
+const toast = useToast()
 const clearing = ref(false)
 const loading = ref(false)
 
@@ -49,8 +51,10 @@ async function clearFaults() {
     lockId = await props.client.acquireLock(props.path, 10)
     await props.client.clearFaults(props.path, lockId)
     await load()
+    toast.success('Faults cleared')
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
+    toast.error(`Clear faults failed: ${error.value}`)
   } finally {
     if (lockId) await props.client.releaseLock(props.path, lockId).catch(() => {})
     clearing.value = false

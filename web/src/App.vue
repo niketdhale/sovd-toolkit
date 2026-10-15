@@ -6,6 +6,7 @@ import EntityBrowser from './views/EntityBrowser.vue'
 import FaultViewer from './views/FaultViewer.vue'
 import DataTable from './views/DataTable.vue'
 import LiveChart from './views/LiveChart.vue'
+import { toasts, dismissToast } from './composables/useToast'
 
 // D1 (settled 2026-08-20): points at a domain server directly, not the
 // gateway -- streaming through a Phase 4 proxy is a deliberate 501, so
@@ -211,6 +212,22 @@ function selectEntity(path: string) {
         </div>
       </nav>
     </header>
+
+    <div aria-live="polite" class="fixed right-4 bottom-4 z-50 flex w-72 flex-col gap-2">
+      <div
+        v-for="t in toasts"
+        :key="t.id"
+        class="flex items-start gap-2 rounded-lg px-3 py-2 text-sm shadow-lg ring-1"
+        :class="t.kind === 'success'
+          ? 'bg-green-50 text-green-800 ring-green-600/20 dark:bg-green-950 dark:text-green-300 dark:ring-green-500/30'
+          : 'bg-red-50 text-red-800 ring-red-600/20 dark:bg-red-950 dark:text-red-300 dark:ring-red-500/30'"
+        :role="t.kind === 'error' ? 'alert' : 'status'"
+      >
+        <Icon :name="t.kind === 'success' ? 'check' : 'warning'" class="mt-0.5 size-4 shrink-0" />
+        <span class="min-w-0 flex-1 break-words">{{ t.text }}</span>
+        <button type="button" class="shrink-0 opacity-60 hover:opacity-100" aria-label="Dismiss" @click="dismissToast(t.id)">×</button>
+      </div>
+    </div>
 
     <main v-if="client" class="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
       <EntityBrowser v-if="tab === 'entities'" :entities="entities" @select="selectEntity" />

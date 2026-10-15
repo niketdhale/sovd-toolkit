@@ -19,8 +19,9 @@ treated as a first-class requirement rather than an afterthought.
 DoIP) · ISO/SAE 21434 (see [`docs/TARA.md`](docs/TARA.md)) · UN-R155 / R156
 (see [`docs/COMPLIANCE.md`](docs/COMPLIANCE.md))
 
-<!-- TODO: screenshot of the Live Chart / Data Table screen goes here -->
-![Web UI — live data streaming over SSE](docs/images/web-ui-live-chart.png)
+![SOVD Toolkit demo](docs/demo.gif)
+
+*Web UI against the real `sovd_server` (mock adapter). More in [`docs/screenshots/`](docs/screenshots/).*
 
 > Design rationale, the phase-by-phase build log, and every settled
 > architectural decision (with the reasoning, including the ones that changed
@@ -286,8 +287,13 @@ running the UDS/DoIP adapter against a real DoIP target are all covered in
 
 ## Web UI
 
-A Vue 3 + Vite UI lives in [`web/`](web/) (entity browser, faults, typed data
-read/write, live chart). It discovers everything from `/docs` at runtime.
+A Vue 3 + Vite UI lives in [`web/`](web/). It discovers everything from `/docs` at runtime.
+
+- **Entities:** filter box, flat list or collapsible tree.
+- **Faults:** status badges, status filter, clear (lock-gated), retry on error.
+- **Data:** typed read/write widgets, copy value, Raw JSON toggle, auto-refresh.
+- **Live:** SSE chart with time window, latest-value readout, pause/resume and automatic reconnect with backoff.
+- **Polish:** toast notifications, dark mode, keyboard shortcuts (`1`-`4`, `/`, `r`), URL hash (`#/<tab>/<entity>`) so views are linkable, connection URL remembered (token never persisted).
 
 ```bash
 ./build/sovd_server config/domain_body.yaml &   # CORS already allows :5173
@@ -304,7 +310,12 @@ cd web && bun install && bun run dev            # http://localhost:5173
   `./build/sovd_server --web-root web/dist config/domain_body.yaml` (or
   `SOVD_WEB_ROOT=web/dist`) serves it at `http://localhost:20003/index.html`.
   Same origin, so no CORS setup is needed. `GET /` and `/v1/...` stay the
-  API; other GET paths fall back to `index.html`.
+  API; the UI lives at `/index.html`.
+- **Web dev commands** (run in `web/`, always `bun`): `bun install`,
+  `bun run dev`, `bun run lint`, `bun run test:run`, `bun run build`.
+- **CI** (`.github/workflows/ci.yml`): a C++ matrix (MOCK x UDS_DOIP) with
+  tests, cross-phase check and SBOM, plus a `web` job running
+  `bun install --frozen-lockfile`, lint, test and build.
 
 ---
 

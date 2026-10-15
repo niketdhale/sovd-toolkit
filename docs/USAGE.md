@@ -70,7 +70,24 @@ The default base URL can be set with `VITE_SOVD_BASE_URL` (`web/.env.example`).
 ./build/sovd_server --web-root web/dist config/domain_body.yaml &
 # open http://localhost:20003/index.html -- same origin, no CORS needed
 ```
-Four screens: Entity Browser, Fault Viewer (read + filter + clear), Data
+`GET /` stays the JSON API self-description; the UI is served at `/index.html`
+(other non-API GET paths fall back to it). Web checks: `bun run lint`,
+`bun run test:run`, `bun run build` (all run in CI).
+
+Features: entity filter + tree view; fault status badges; data copy,
+Raw JSON toggle and auto-refresh; live chart with time window, latest-value
+readout, pause and auto-reconnect; toast notifications; dark mode; the view is
+kept in the URL hash (`#/<tab>/<entity path>`). Screenshots:
+[`docs/screenshots/`](screenshots/).
+
+| Key | Action |
+|---|---|
+| `1` `2` `3` `4` | Switch tab (Entities, Faults, Data, Live) |
+| `/` | Focus the entity filter |
+| `r` | Refresh the current view |
+
+Shortcuts are ignored while typing in a field.
+Four screens (tabs `1`-`4`): Entity Browser, Fault Viewer (read + filter + clear), Data
 Table (typed read/write widgets built purely from `/docs` — an enum
 `<select>`, a numeric input with its unit, a length-capped text field,
 nothing hardcoded per-entity), Live Chart (SSE + a hand-rolled SVG polyline).

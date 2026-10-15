@@ -17,7 +17,7 @@ every documented configuration, including the previously-broken
 **B1, B2, and B3 are all DONE. Phase 7 (Vue web UI, all four screens) is
 COMPLETE, browser-verified 2026-08-20** — `web/`, Vue 3 + Vite + Tailwind,
 pointed at a domain server per D1, typed widgets from `/docs` per B1, CORS
-per B2, 10s lock-heartbeat lifecycle per D3. `npm run build` type-checks
+per B2, 10s lock-heartbeat lifecycle per D3. `bun run build` type-checks
 clean, every API call pattern was verified live with curl against a real
 server, and — the item this file had flagged as the one remaining
 check — **a real Chromium browser (Playwright MCP) then clicked through all
@@ -1341,7 +1341,7 @@ first two bullets.
 rendered from `/docs`. Hardcoding DIDs in the frontend throws away the thing
 that makes SOVD better than ODX.
 
-Verified: `npm run build` (`vue-tsc -b && vite build`) compiles clean, zero
+Verified: `bun run build` (`vue-tsc -b && vite build`) compiles clean, zero
 type errors. Every API call pattern each screen makes was first verified
 live with curl using the real `Origin: http://localhost:5173` header against
 a real running domain server — version discovery (`GET /`), `/docs`, batch
@@ -1352,7 +1352,7 @@ riding on it, and the SSE stream with its CORS headers.
 browser automation was available in the session that built this phase) is
 now closed: a real Chromium instance (Playwright MCP) drove the actual
 rendered UI against a live `sovd_server config/domain_body.yaml` +
-`npm run dev`. Walked all four screens end to end — connect, select
+`bun run dev`. Walked all four screens end to end — connect, select
 `vehicle/body/bcm`, Entities (all 4 demo entities listed, correct
 `has_backend` flags), Faults (both seeded faults shown, `?status=confirmed`
 filter correctly narrows to one row), Data (all three catalog items with
@@ -1480,7 +1480,7 @@ them. **Do these first, in this order.**
       `web/` is its own Vite project/dev-server/build, no static files
       served from `sovd_server` at all. `config/domain_body.yaml` carries
       `cors_allowed_origins: [http://localhost:5173]` (Vite's default port)
-      so the existing two-tier demo config just works with `npm run dev`
+      so the existing two-tier demo config just works with `bun run dev`
       out of the box.
 - [ ] Self-signed cert warnings / mixed content / mDNS `.local` resolution
       — not applicable to this session's plain-`http://localhost` setup;

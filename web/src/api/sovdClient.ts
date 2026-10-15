@@ -135,6 +135,13 @@ export class SovdClient {
     }
   }
 
+  // Unversioned discovery root: { server_id, role, api_versions }.
+  async getRoot(): Promise<{ server_id: string; role: string; api_versions: string[] }> {
+    const res = await fetch(`${this.baseUrl}/`)
+    if (!res.ok) throw new SovdError(res.status, 'ROOT_UNREACHABLE', 'failed to reach server root')
+    return res.json()
+  }
+
   async listEntities(): Promise<EntityInfo[]> {
     return (await this.request('GET', '/entities')).items
   }

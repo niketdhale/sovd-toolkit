@@ -14,6 +14,17 @@ function mockFetch(...responses: Response[]) {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('SovdClient', () => {
+  it('getRoot returns the discovery document', async () => {
+    const f = mockFetch(res({ server_id: 's1', role: 'domain', api_versions: ['v1'] }))
+    expect(await new SovdClient('http://x').getRoot()).toEqual({ server_id: 's1', role: 'domain', api_versions: ['v1'] })
+    expect(f.mock.calls[0][0]).toBe('http://x/')
+  })
+
+  it('getRoot throws SovdError on a failing root', async () => {
+    mockFetch(res('nope', 503))
+    await expect(new SovdClient('http://x').getRoot()).rejects.toMatchObject({ status: 503, code: 'ROOT_UNREACHABLE' })
+  })
+
   it('discovers the api version from the root', async () => {
     const f = mockFetch(res({ api_versions: ['v2'] }), res({ items: [] }))
     await new SovdClient('http://x').listEntities()

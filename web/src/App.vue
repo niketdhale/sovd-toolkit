@@ -80,8 +80,7 @@ async function connect() {
   try {
     const list = await c.listEntities()
     // Root info is discovery-driven too -- shown as-is, never assumed.
-    const rootRes = await fetch(`${url}/`)
-    const root = await rootRes.json()
+    const root = await c.getRoot()
     serverId.value = root.server_id
     role.value = root.role
     entities.value = list

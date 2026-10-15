@@ -10,13 +10,16 @@ import LiveChart from './views/LiveChart.vue'
 // D1 (settled 2026-08-20): points at a domain server directly, not the
 // gateway -- streaming through a Phase 4 proxy is a deliberate 501, so
 // screen 4 can't run against the gateway tier.
-const baseUrlInput = ref(import.meta.env.VITE_SOVD_BASE_URL ?? 'http://localhost:20003')
+let savedUrl: string | null = null
+try { savedUrl = localStorage.getItem('baseUrl') } catch { /* ignore */ }
+const baseUrlInput = ref(savedUrl ?? import.meta.env.VITE_SOVD_BASE_URL ?? 'http://localhost:20003')
 // docs/reviews/round-1.md Task 1b: optional -- an unauthenticated server
 // (this project's default demo config) never checks this at all, matching
 // SovdClient.token's own "unset means no Authorization header" behavior.
 const tokenInput = ref('')
 const connectError = ref<string | null>(null)
 const connecting = ref(false)
+const editing = ref(false) // expands the connect form while connected
 const client = ref<SovdClient | null>(null)
 const serverId = ref('')
 const role = ref('')
@@ -65,6 +68,9 @@ async function connect() {
     role.value = root.role
     entities.value = list
     client.value = c
+    editing.value = false
+    // Only the URL is remembered -- never the token.
+    try { localStorage.setItem('baseUrl', url) } catch { /* ignore */ }
   } catch (e) {
     // docs/reviews/round-1.md Task 1b: 401 ("no/invalid token") and 403
     // ("valid token, wrong scope") are different user problems -- the
@@ -98,7 +104,7 @@ function selectEntity(path: string) {
             <h1 class="text-base font-semibold text-gray-900 dark:text-white">SOVD Toolkit</h1>
           </div>
 
-          <form class="flex min-w-0 flex-1 flex-wrap items-center gap-2" @submit.prevent="connect">
+          <form v-if="!client || editing" class="flex min-w-0 flex-1 flex-wrap items-center gap-2" @submit.prevent="connect">
             <label for="base-url" class="sr-only">Server base URL</label>
             <input
               id="base-url"
@@ -120,6 +126,14 @@ function selectEntity(path: string) {
               {{ connecting ? 'Connecting…' : client ? 'Reconnect' : 'Connect' }}
             </button>
           </form>
+          <div v-else class="flex min-w-0 basis-full items-center gap-2 sm:basis-0 sm:flex-1">
+            <span class="badge badge-gray min-w-0">
+              <span class="truncate">connected to {{ client.baseUrl }}</span>
+            </span>
+            <button type="button" class="btn btn-secondary" aria-label="Edit connection" @click="editing = true">
+              <Icon name="pencil" class="size-4" />Edit
+            </button>
+          </div>
 
           <div class="flex flex-wrap items-center gap-2 text-sm" role="status" aria-live="polite">
             <template v-if="client">

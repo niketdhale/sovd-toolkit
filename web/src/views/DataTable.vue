@@ -41,9 +41,11 @@ function setTimer() {
 watch(autoSecs, setTimer)
 onUnmounted(() => clearInterval(timer))
 
+const emit = defineEmits<{ lock: [held: boolean] }>()
 const toast = useToast()
 const lock = useLock(props.client, () => props.path!)
 const editMode = computed(() => lock.lockId.value !== null)
+watch(editMode, (v) => emit('lock', v))
 
 function accessBadge(access: string) {
   if (access === 'read') return 'badge badge-gray'

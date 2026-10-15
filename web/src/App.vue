@@ -66,6 +66,8 @@ const hash = computed(() => `#/${tab.value}${selectedPath.value ? '/' + selected
 watch(hash, (h) => {
   if (client.value && location.hash !== h) location.hash = h
 })
+const dataLocked = ref(false) // set by DataTable while it holds the edit lock
+watch(tab, () => (dataLocked.value = false)) // DataTable unmounts (and releases) on tab change
 const view = ref<{ refresh?: () => void } | null>(null)
 async function onKey(e: KeyboardEvent) {
   const el = e.target as HTMLElement
@@ -230,6 +232,13 @@ function selectEntity(path: string) {
             title="Keyboard shortcuts: 1-4 switch tabs, / filter entities, r refresh"
             aria-label="Keyboard shortcuts: 1 to 4 switch tabs, slash filters entities, r refreshes"
           >?</span>
+          <span
+            v-if="dataLocked && tab === 'data' && selectedEntity"
+            class="badge badge-amber"
+            title="Lock held by this session; the API exposes no holder or expiry, heartbeat renews every ~5s (10s TTL)"
+          >
+            <Icon name="lock" class="mr-1 size-3.5" />Locked by you
+          </span>
           <p v-if="selectedEntity" class="hidden text-sm text-gray-500 sm:block dark:text-gray-400">
             selected
             <code class="ml-1 rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-700 dark:bg-white/10 dark:text-gray-300">{{
@@ -259,7 +268,7 @@ function selectEntity(path: string) {
     <main v-if="client" class="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
       <EntityBrowser v-if="tab === 'entities'" :entities="entities" @select="selectEntity" />
       <FaultViewer v-else-if="tab === 'faults'" ref="view" :client="client" :path="selectedPath" />
-      <DataTable v-else-if="tab === 'data'" ref="view" :client="client" :path="selectedPath" />
+      <DataTable v-else-if="tab === 'data'" ref="view" :client="client" :path="selectedPath" @lock="dataLocked = $event" />
       <LiveChart v-else-if="tab === 'live'" ref="view" :client="client" :path="selectedPath" />
     </main>
 

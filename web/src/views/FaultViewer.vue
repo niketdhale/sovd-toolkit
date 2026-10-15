@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import Icon from '../components/Icon.vue'
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import type { SovdClient, FaultInfo } from '../api/sovdClient'
 
 const props = defineProps<{ client: SovdClient; path: string | null }>()
@@ -13,9 +13,12 @@ const loading = ref(false)
 
 function badgeFor(status: string) {
   if (status === 'confirmed') return 'badge badge-red'
-  if (status === 'pending') return 'badge badge-amber'
+  if (status === 'testFailed') return 'badge badge-amber'
+  if (status === 'pending') return 'badge badge-indigo'
   return 'badge badge-gray'
 }
+
+const sorted = computed(() => [...faults.value].sort((a, b) => a.code.localeCompare(b.code)))
 
 async function load() {
   if (!props.path) return
@@ -38,7 +41,7 @@ async function load() {
 // reason). useLock's heartbeat+beforeunload machinery is for DataTable's
 // held-open edit sessions, not this.
 async function clearFaults() {
-  if (!props.path) return
+  if (!props.path || !confirm(`Clear all faults on ${props.path}?`)) return
   clearing.value = true
   error.value = null
   let lockId: string | null = null
@@ -99,7 +102,7 @@ watch(() => [props.path, statusFilter.value], load, { immediate: true })
             <td class="py-4 pl-4 pr-3 sm:pl-6"><div class="skeleton h-4 w-24"></div></td>
             <td class="px-3 py-4"><div class="skeleton h-5 w-16"></div></td>
           </tr>
-          <tr v-for="f in faults" :key="f.code" class="hover:bg-gray-50 dark:hover:bg-white/5">
+          <tr v-for="f in sorted" :key="f.code" class="hover:bg-gray-50 dark:hover:bg-white/5">
             <td class="py-4 pl-4 pr-3 font-mono text-sm text-gray-900 sm:pl-6 dark:text-gray-100">{{ f.code }}</td>
             <td class="px-3 py-4 text-sm"><span :class="badgeFor(f.status)">{{ f.status }}</span></td>
           </tr>

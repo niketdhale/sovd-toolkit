@@ -18,26 +18,33 @@ const logLines = ref<string[]>([])
 const error = ref<string | null>(null)
 const streaming = ref(false)
 const loadingDocs = ref(false)
-const streamState = ref<'stopped' | 'live' | 'error'>('stopped')
+const streamState = ref<'stopped' | 'live' | 'paused' | 'reconnecting' | 'error'>('stopped')
 
 let es: EventSource | null = null
+let retryTimer: ReturnType<typeof setTimeout> | undefined
+let backoffMs = 1000
 
 const selectedItem = computed(() => docs.value?.data.find((d) => d.id === selectedId.value) ?? null)
 
 function closeStream() {
+  clearTimeout(retryTimer)
   if (es) {
     es.close()
     es = null
   }
   streaming.value = false
-  if (streamState.value === 'live') streamState.value = 'stopped'
+  streamState.value = 'stopped'
+}
+
+function pauseStream() {
+  closeStream()
+  streamState.value = 'paused'
 }
 
 async function loadDocs() {
   docs.value = null
   selectedId.value = ''
   closeStream()
-  streamState.value = 'stopped'
   if (!props.path) return
   error.value = null
   loadingDocs.value = true
@@ -52,9 +59,14 @@ async function loadDocs() {
 }
 
 async function startStream() {
-  closeStream()
   points.value = []
   logLines.value = []
+  await openStream()
+}
+
+// Opens (or re-opens, on resume/reconnect) without clearing collected points.
+async function openStream() {
+  closeStream()
   error.value = null
   if (!props.path || !selectedId.value) return
 
@@ -73,6 +85,7 @@ async function startStream() {
   streaming.value = true
   streamState.value = 'live'
   es.onopen = () => {
+    backoffMs = 1000
     streamState.value = 'live'
     error.value = null
   }
@@ -93,8 +106,14 @@ async function startStream() {
     }
   }
   es.onerror = () => {
-    error.value = 'stream connection interrupted (browser will auto-retry)'
-    streamState.value = 'error'
+    // Close and reopen ourselves: a ticketed URL is single-use, and the
+    // browser gives up for good on some errors. Exponential backoff, capped.
+    es?.close()
+    es = null
+    streamState.value = 'reconnecting'
+    error.value = `stream interrupted, retrying in ${backoffMs / 1000}s`
+    retryTimer = setTimeout(openStream, backoffMs)
+    backoffMs = Math.min(backoffMs * 2, 30000)
   }
 }
 
@@ -143,15 +162,18 @@ onUnmounted(closeStream)
         </label>
         <span
           class="badge"
-          :class="{ 'badge-green': streamState === 'live', 'badge-gray': streamState === 'stopped', 'badge-red': streamState === 'error' }"
+          :class="{ 'badge-green': streamState === 'live', 'badge-gray': streamState === 'stopped' || streamState === 'paused', 'badge-amber': streamState === 'reconnecting', 'badge-red': streamState === 'error' }"
           role="status"
         >
-          <span class="mr-1.5 size-1.5 rounded-full" :class="{ 'animate-pulse bg-green-500': streamState === 'live', 'bg-gray-400': streamState === 'stopped', 'bg-red-500': streamState === 'error' }"></span>
-          {{ streamState === 'live' ? 'Live' : streamState === 'error' ? 'Error' : 'Stopped' }}
+          <span class="mr-1.5 size-1.5 rounded-full" :class="{ 'animate-pulse bg-green-500': streamState === 'live', 'bg-gray-400': streamState === 'stopped' || streamState === 'paused', 'animate-pulse bg-amber-500': streamState === 'reconnecting', 'bg-red-500': streamState === 'error' }"></span>
+          {{ { live: 'Live', paused: 'Paused', reconnecting: 'Reconnecting…', error: 'Error', stopped: 'Stopped' }[streamState] }}
         </span>
-        <button class="btn" :class="streaming ? 'btn-danger' : 'btn-primary'" :disabled="!selectedId" @click="streaming ? closeStream() : startStream()">
+        <button v-if="streaming || streamState === 'reconnecting' || streamState === 'paused'" class="btn btn-secondary" @click="streamState === 'paused' ? openStream() : pauseStream()">
+          {{ streamState === 'paused' ? 'Resume' : 'Pause' }}
+        </button>
+        <button class="btn" :class="streaming ? 'btn-danger' : 'btn-primary'" :disabled="!selectedId" @click="streaming || streamState !== 'stopped' ? closeStream() : startStream()">
           <span v-if="streaming" class="size-1.5 animate-pulse rounded-full bg-white"></span>
-          {{ streaming ? 'Stop' : 'Start streaming' }}
+          {{ streaming || streamState === 'reconnecting' || streamState === 'paused' ? 'Stop' : 'Start streaming' }}
         </button>
       </div>
       <div v-if="error" role="alert" class="alert-error mt-4 mb-0">

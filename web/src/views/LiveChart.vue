@@ -130,6 +130,8 @@ const stats = computed(() =>
   points.value.length ? { min: Math.min(...points.value), max: Math.max(...points.value), latest: points.value[points.value.length - 1] } : null,
 )
 
+const fmt = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(n))
+
 const svgPoints = computed(() => {
   if (points.value.length < 2) return ''
   const min = Math.min(...points.value)
@@ -212,9 +214,9 @@ defineExpose({ refresh: () => loadDocs() })
         </svg>
         <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
           last {{ points.length }} value(s)<template v-if="stats">
-            · min <span class="font-semibold text-gray-900 dark:text-gray-100">{{ stats.min.toFixed(2) }}</span>
-            · max <span class="font-semibold text-gray-900 dark:text-gray-100">{{ stats.max.toFixed(2) }}</span>
-            · latest <span class="font-semibold text-gray-900 dark:text-gray-100">{{ stats.latest }} {{ selectedItem?.unit ?? '' }}</span></template>
+            · min <span class="font-semibold text-gray-900 dark:text-gray-100">{{ fmt(stats.min) }}</span>
+            · max <span class="font-semibold text-gray-900 dark:text-gray-100">{{ fmt(stats.max) }}</span>
+            · latest <span class="font-semibold text-gray-900 dark:text-gray-100">{{ fmt(stats.latest) }} {{ selectedItem?.unit ?? '' }}</span></template>
         </p>
       </div>
 

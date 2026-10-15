@@ -1,7 +1,13 @@
 @import "tailwindcss";
 
+/* Class-based dark mode so the header toggle can override the OS setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+}
+:root.dark {
+  color-scheme: dark;
 }
 
 body {

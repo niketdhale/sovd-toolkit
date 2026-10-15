@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import Icon from '../components/Icon.vue'
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, onUnmounted } from 'vue'
 import type { SovdClient, DocsResult, DataItemDoc, DataValue } from '../api/sovdClient'
 import { useLock } from '../composables/useLock'
 
@@ -17,6 +17,29 @@ const error = ref<string | null>(null)
 const writingId = ref<string | null>(null)
 const loading = ref(false)
 
+const showJson = ref(false)
+const refreshedAt = ref<Date | null>(null)
+const autoSecs = ref(0)
+const copiedId = ref<string | null>(null)
+let timer: ReturnType<typeof setInterval> | undefined
+
+async function copyValue(id: string) {
+  try {
+    await navigator.clipboard.writeText(String(values.value[id]?.value ?? ''))
+    copiedId.value = id
+    setTimeout(() => { if (copiedId.value === id) copiedId.value = null }, 1500)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function setTimer() {
+  clearInterval(timer)
+  timer = autoSecs.value && props.path ? setInterval(() => { if (!loading.value && !editMode.value) load(true) }, autoSecs.value * 1000) : undefined
+}
+watch(autoSecs, setTimer)
+onUnmounted(() => clearInterval(timer))
+
 const lock = useLock(props.client, () => props.path!)
 const editMode = computed(() => lock.lockId.value !== null)
 
@@ -26,9 +49,11 @@ function accessBadge(access: string) {
   return 'badge badge-green'
 }
 
-async function load() {
-  docs.value = null
-  values.value = {}
+async function load(silent = false) {
+  if (!silent) {
+    docs.value = null
+    values.value = {}
+  }
   if (!props.path) return
   error.value = null
   loading.value = true
@@ -48,6 +73,7 @@ async function load() {
     }
     values.value = valueMap
     drafts.value = draftMap
+    refreshedAt.value = new Date()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -85,6 +111,7 @@ watch(
   () => props.path,
   async (_next, prev) => {
     if (prev && editMode.value) await lock.release()
+    setTimer()
     await load()
   },
   { immediate: true },
@@ -102,7 +129,15 @@ watch(
         <h2 class="text-base font-semibold text-gray-900 dark:text-white">Data</h2>
         <p class="mt-1 font-mono text-sm text-gray-500 dark:text-gray-400">{{ path }}</p>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <span v-if="refreshedAt" class="text-xs text-gray-500 dark:text-gray-400">refreshed {{ refreshedAt.toLocaleTimeString() }}</span>
+        <label for="auto-refresh" class="sr-only">Auto-refresh</label>
+        <select id="auto-refresh" v-model.number="autoSecs" class="field">
+          <option :value="0">Auto-refresh: off</option>
+          <option :value="5">Every 5s</option>
+          <option :value="10">Every 10s</option>
+        </select>
+        <button type="button" class="btn btn-secondary" :aria-pressed="showJson" @click="showJson = !showJson">{{ showJson ? 'Table' : 'Raw JSON' }}</button>
         <span v-if="editMode" class="text-xs text-gray-500 dark:text-gray-400">lock renews every ~5s (10s TTL)</span>
         <button class="btn" :class="editMode ? 'bg-amber-100 text-amber-800 hover:bg-amber-200 dark:bg-amber-500/10 dark:text-amber-400' : 'btn-primary'" @click="toggleEdit">
           {{ editMode ? 'Stop editing' : 'Enable editing' }}
@@ -112,10 +147,11 @@ watch(
 
     <div v-if="error" role="alert" class="alert-error">
       <span>{{ error }}</span>
-      <button type="button" class="btn btn-secondary shrink-0" @click="load"><Icon name="retry" class="size-4" />Retry</button>
+      <button type="button" class="btn btn-secondary shrink-0" @click="load()"><Icon name="retry" class="size-4" />Retry</button>
     </div>
 
-    <div class="card overflow-x-auto">
+    <pre v-if="showJson" class="card overflow-x-auto p-4 font-mono text-xs text-gray-900 dark:text-gray-100">{{ JSON.stringify(Object.values(values), null, 2) }}</pre>
+    <div v-else class="card overflow-x-auto">
       <table class="min-w-full divide-y divide-gray-200 dark:divide-white/10">
         <thead class="bg-gray-50 dark:bg-white/5">
           <tr>
@@ -157,6 +193,15 @@ watch(
               </template>
             </td>
             <td class="py-4 pl-3 pr-4 text-right sm:pr-6">
+              <button
+                v-if="!editMode || item.access === 'read'"
+                type="button"
+                class="btn btn-secondary"
+                :disabled="values[item.id]?.value === undefined"
+                @click="copyValue(item.id)"
+              >
+                <Icon :name="copiedId === item.id ? 'check' : 'copy'" class="size-4" />{{ copiedId === item.id ? 'Copied' : 'Copy value' }}
+              </button>
               <button
                 v-if="editMode && item.access !== 'read'"
                 class="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-semibold text-white shadow-xs hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-50"

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import Icon from './components/Icon.vue'
-import { ref, computed, watchEffect } from 'vue'
+import { ref, computed, watch, watchEffect, onMounted, onUnmounted } from 'vue'
 import { SovdClient, SovdError, type EntityInfo } from './api/sovdClient'
 import EntityBrowser from './views/EntityBrowser.vue'
 import FaultViewer from './views/FaultViewer.vue'
@@ -53,6 +53,24 @@ const tab = ref<(typeof tabs)[number]['id']>('entities')
 
 const selectedEntity = computed(() => entities.value.find((e) => e.path === selectedPath.value) ?? null)
 
+// Location hash: #/<tab>[/<entity path>]. Applied once connected.
+function readHash() {
+  const [, t, ...rest] = decodeURIComponent(location.hash).split('/')
+  const found = tabs.find((x) => x.id === t)
+  if (found) tab.value = found.id
+  const p = rest.join('/')
+  selectedPath.value = p && entities.value.some((e) => e.path === p) ? p : null
+}
+const hash = computed(() => `#/${tab.value}${selectedPath.value ? '/' + selectedPath.value : ''}`)
+watch(hash, (h) => {
+  if (client.value && location.hash !== h) location.hash = h
+})
+onMounted(() => window.addEventListener('hashchange', onHash))
+onUnmounted(() => window.removeEventListener('hashchange', onHash))
+function onHash() {
+  if (client.value) readHash()
+}
+
 async function connect() {
   connectError.value = null
   connecting.value = true
@@ -62,13 +80,13 @@ async function connect() {
   try {
     const list = await c.listEntities()
     // Root info is discovery-driven too -- shown as-is, never assumed.
-    const rootRes = await fetch(`${url}/`)
-    const root = await rootRes.json()
+    const root = await c.getRoot()
     serverId.value = root.server_id
     role.value = root.role
     entities.value = list
     client.value = c
     editing.value = false
+    if (location.hash) readHash()
     // Only the URL is remembered -- never the token.
     try { localStorage.setItem('baseUrl', url) } catch { /* ignore */ }
   } catch (e) {

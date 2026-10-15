@@ -58,8 +58,17 @@ curl -N "http://127.0.0.1:20003/v1/entities/vehicle/body/bcm/data/battery_voltag
 
 ```bash
 ./build/sovd_server config/domain_body.yaml &   # cors_allowed_origins already includes :5173
-cd web && npm install && npm run dev
+cd web && bun install && bun run dev
 # open http://localhost:5173, enter the server's base URL, click Connect
+```
+The default base URL can be set with `VITE_SOVD_BASE_URL` (`web/.env.example`).
+
+**Hosted by the server** (optional, off by default): build once, then point
+`--web-root` (or `SOVD_WEB_ROOT`) at the output.
+```bash
+(cd web && bun run build)             # -> web/dist
+./build/sovd_server --web-root web/dist config/domain_body.yaml &
+# open http://localhost:20003/index.html -- same origin, no CORS needed
 ```
 Four screens: Entity Browser, Fault Viewer (read + filter + clear), Data
 Table (typed read/write widgets built purely from `/docs` — an enum
@@ -71,7 +80,7 @@ what running them together actually looks like):
 ```bash
 SOVD_OAUTH2_SECRET=demo-secret ./build/sovd_server config/domain_body_auth.yaml &
 ./build/sovd_mint_token demo-secret read:data,execute:routines,read:faults 3600
-cd web && npm run dev
+cd web && bun run dev
 # open http://localhost:5173, paste the minted token into the token field
 # next to the base URL, click Connect
 ```

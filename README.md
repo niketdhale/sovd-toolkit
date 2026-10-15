@@ -284,6 +284,30 @@ running the UDS/DoIP adapter against a real DoIP target are all covered in
 
 ---
 
+## Web UI
+
+A Vue 3 + Vite UI lives in [`web/`](web/) (entity browser, faults, typed data
+read/write, live chart). It discovers everything from `/docs` at runtime.
+
+```bash
+./build/sovd_server config/domain_body.yaml &   # CORS already allows :5173
+cd web && bun install && bun run dev            # http://localhost:5173
+```
+
+- **Server URL:** defaults to `http://localhost:20003`; override at build/dev
+  time with `VITE_SOVD_BASE_URL` (see `web/.env.example`) or edit it in the UI.
+- **Token field:** when the server runs with `SOVD_OAUTH2_SECRET`, paste a
+  token from `sovd_mint_token` next to the URL; it is sent as
+  `Authorization: Bearer ...` and never persisted.
+- **Served by the server itself (optional, off by default):**
+  `cd web && bun run build` writes `web/dist`; then
+  `./build/sovd_server --web-root web/dist config/domain_body.yaml` (or
+  `SOVD_WEB_ROOT=web/dist`) serves it at `http://localhost:20003/index.html`.
+  Same origin, so no CORS setup is needed. `GET /` and `/v1/...` stay the
+  API; other GET paths fall back to `index.html`.
+
+---
+
 ## API surface
 
 | Method | Path | Notes |

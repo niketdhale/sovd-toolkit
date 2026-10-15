@@ -3,6 +3,7 @@ import Icon from '../components/Icon.vue'
 import { ref, watch, computed, onUnmounted } from 'vue'
 import type { SovdClient, DocsResult, DataItemDoc, DataValue } from '../api/sovdClient'
 import { useLock } from '../composables/useLock'
+import { useToast } from '../composables/useToast'
 
 // Screen 3. Every widget is chosen purely from item.type/item.access/
 // item.values coming back from GET .../docs -- no entity- or DID-specific
@@ -40,8 +41,11 @@ function setTimer() {
 watch(autoSecs, setTimer)
 onUnmounted(() => clearInterval(timer))
 
+const emit = defineEmits<{ lock: [held: boolean] }>()
+const toast = useToast()
 const lock = useLock(props.client, () => props.path!)
 const editMode = computed(() => lock.lockId.value !== null)
+watch(editMode, (v) => emit('lock', v))
 
 function accessBadge(access: string) {
   if (access === 'read') return 'badge badge-gray'
@@ -86,8 +90,11 @@ async function toggleEdit() {
   try {
     if (editMode.value) await lock.release()
     else await lock.acquire()
+    if (editMode.value) toast.success('Lock acquired')
+    else toast.success('Lock released')
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
+    toast.error(`Lock failed: ${error.value}`)
   }
 }
 
@@ -100,8 +107,10 @@ async function writeItem(item: DataItemDoc) {
     const value: unknown = item.type === 'float' ? Number(raw) : raw
     await props.client.putData(props.path, item.id, value, lock.lockId.value)
     await load()
+    toast.success(`Wrote ${item.id}`)
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
+    toast.error(`Write failed: ${error.value}`)
   } finally {
     writingId.value = null
   }
@@ -116,6 +125,7 @@ watch(
   },
   { immediate: true },
 )
+defineExpose({ refresh: () => load() })
 </script>
 
 <template>
